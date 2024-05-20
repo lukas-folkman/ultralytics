@@ -708,12 +708,11 @@ if KARLO_CPA:
                     break
 
                 # LF - check this first, if ioa is high, no need to copy instances
+                ioa = None
                 if target_instances.bboxes.size > 0:
                     # LF - bbox_ioa expects both boxes in xyxy format
                     ioa = bbox_ioa(self.annotations_data[ann_id]['instances']['bboxes'], target_instances.bboxes)
-                else:
-                    ioa = None
-
+                
                 # LF - this should happen also when target_instances is 0
                 if ioa is None or np.all(ioa < 0.3):
                     annotation = deepcopy(self.annotations_data[ann_id])
