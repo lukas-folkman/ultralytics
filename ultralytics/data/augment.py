@@ -1,5 +1,5 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
-
+import copy
 import math
 import random
 from copy import deepcopy
@@ -16,6 +16,87 @@ from ultralytics.utils.metrics import bbox_ioa
 from ultralytics.utils.ops import segment2box
 
 from .utils import polygons2masks, polygons2masks_overlap
+
+KARLO_CPA = True
+RESIZE = (640, 360) # (WIDTH, HEIGHT) or None
+
+if KARLO_CPA:
+    import json
+    from random import sample
+
+    IMG_DIR = "../data/resources/GLOW_low_visibility_estuaries/images/"
+    COPY_PASTE_JSON_FN = "../data/resources/GLOW_low_visibility_estuaries/GLOW_low_visibility_estuaries.json"
+
+    def load_image(file_path):
+        image = cv2.imread(file_path)
+        if RESIZE is not None:
+            image = cv2.resize(image, RESIZE, interpolation=cv2.INTER_LINEAR)
+        if image is None:
+            raise FileNotFoundError(f"No image found at {file_path}")
+        return image
+
+
+    def load_json_data(file_path):
+        with open(file_path, 'r') as file:
+            return json.load(file)
+
+
+    def create_instances(bboxes, segments, width, height):
+        # LF - check that it is really just a single box
+        assert isinstance(bboxes, list) and len(bboxes) == 4 and \
+               (isinstance(bboxes[0], int) or isinstance(bboxes[0], float)), bboxes
+        bboxes = np.array([bboxes], dtype=float)
+        # LF - convert to xyxy
+        bboxes[:, 2] += bboxes[:, 0]
+        bboxes[:, 3] += bboxes[:, 1]
+        segments = [np.array(segment, dtype=float).reshape(-1, 2) for segment in segments]
+
+        # LF - resizing
+        if RESIZE is not None:
+            w_ratio = RESIZE[0] / width
+            h_ratio = RESIZE[1] / height
+            bboxes[:, 0] *= w_ratio
+            bboxes[:, 1] *= h_ratio
+            bboxes[:, 2] *= w_ratio
+            bboxes[:, 3] *= h_ratio
+
+            for segment in segments:
+                segment[:, 0] *= w_ratio
+                segment[:, 1] *= h_ratio
+
+        return {
+            'bboxes': bboxes, # xyxy format
+            'segments': segments
+        }
+
+
+def process_dataset(data):
+    annotations_data, image_data = [], {}
+    for image in data['images']:
+        file_path = f"{IMG_DIR}{image['file_name']}"
+        image_pixels = load_image(file_path)
+        if image_pixels is None:
+            raise FileNotFoundError(f"No image found at {file_path}")
+        image_id = image['id']
+        image_data[image_id] = {
+            'img': image_pixels,
+            'file_name': image['file_name'],
+            'height': image['height'],
+            'width': image['width'],
+            'img_id': image_id
+        }
+
+    for annotation in data['annotations']:
+        annotations_data.append({
+            'fn': image_data[annotation['image_id']]['file_name'],
+            'img_id': annotation['image_id'],
+            # LF Ultralytics expects 0-based and our file is 1-based
+            'category_id': np.array([annotation['category_id'] - 1]),
+            'instances': create_instances(annotation['bbox'], annotation['segmentation'],
+                                          width=image_data[annotation['image_id']]['width'],
+                                          height=image_data[annotation['image_id']]['height'])
+        })
+    return annotations_data, image_data
 
 
 # TODO: we might need a BaseTransform to make all these augments be compatible with both classification and semantic
@@ -598,45 +679,122 @@ class LetterBox:
         return labels
 
 
-class CopyPaste:
+if KARLO_CPA:
+    class CopyPaste:
+        def __init__(self, p=0.3): # LF
+            self.num_fishes = int(p * 10) # LF - a hack because Ultralytics requires "p" to be in the range of 0 and 1
+            self.blending = False
+            self.annotations_data, self.image_data = process_dataset(load_json_data(COPY_PASTE_JSON_FN)) # LF
 
-    def __init__(self, p=0.5) -> None:
-        self.p = p
+        def __call__(self, labels):
+            cls = labels['cls'] # LF - to make it as similar to the original as possible
+            target_img = labels['img']
+            target_instances = labels.pop('instances') # LF - to make it as similar to the original as possible
+            h, w = target_img.shape[:2]
+            target_instances.convert_bbox(format='xyxy')
+            target_instances.denormalize(w, h)
 
-    def __call__(self, labels):
-        """Implement Copy-Paste augmentation https://arxiv.org/abs/2012.07177, labels as nx5 np.array(cls, xyxy)."""
-        im = labels['img']
-        cls = labels['cls']
-        h, w = im.shape[:2]
-        instances = labels.pop('instances')
-        instances.convert_bbox(format='xyxy')
-        instances.denormalize(w, h)
-        if self.p and len(instances.segments):
-            n = len(instances)
-            _, w, _ = im.shape  # height, width, channels
-            im_new = np.zeros(im.shape, np.uint8)
+            pasted_count = 0
+            shuffled_indices = random.sample(range(len(self.annotations_data)), len(self.annotations_data))
+            for ann_id in shuffled_indices:
+                if pasted_count >= self.num_fishes:
+                    break
 
-            # Calculate ioa first then select indexes randomly
-            ins_flip = deepcopy(instances)
-            ins_flip.fliplr(w)
+                # LF - check this first, if ioa is high, no need to copy instances
+                if target_instances.bboxes.size > 0:
+                    # LF - bbox_ioa expects both boxes in xyxy format
+                    ioa = bbox_ioa(self.annotations_data[ann_id]['instances']['bboxes'], target_instances.bboxes)
+                else:
+                    ioa = None
 
-            ioa = bbox_ioa(ins_flip.bboxes, instances.bboxes)  # intersection over area, (N, M)
-            indexes = np.nonzero((ioa < 0.30).all(1))[0]  # (N, )
-            n = len(indexes)
-            for j in random.sample(list(indexes), k=round(self.p * n)):
-                cls = np.concatenate((cls, cls[[j]]), axis=0)
-                instances = Instances.concatenate((instances, ins_flip[[j]]), axis=0)
-                cv2.drawContours(im_new, instances.segments[[j]].astype(np.int32), -1, (1, 1, 1), cv2.FILLED)
+                # LF - this should happen also when target_instances is 0
+                if ioa is None or np.all(ioa < 0.3):
+                    annotation = deepcopy(self.annotations_data[ann_id])
+                    img_id = annotation['img_id']
+                    source_img = self.image_data[img_id]['img']
+                    source_instances = Instances(
+                        bboxes=annotation['instances']['bboxes'],
+                        segments=annotation['instances']['segments'],
+                        bbox_format='xyxy',
+                        normalized=False
+                    )
+                    assert len(source_instances) == 1
 
-            result = cv2.flip(im, 1)  # augment segments (flip left-right)
-            i = cv2.flip(im_new, 1).astype(bool)
-            im[i] = result[i]
+                    mask = np.zeros(target_img.shape[:2], dtype=np.uint8)
+                    cv2.drawContours(
+                        mask, source_instances.segments.astype(np.int32), -1, (255, 255, 255), cv2.FILLED)
+                    where_mask = np.where(mask)
+                    if self.blending:
+                        target_img[where_mask] = cv2.addWeighted(
+                            target_img[where_mask], 0.5, source_img[where_mask], 0.5, 0)
+                    else:
+                        target_img[where_mask] = source_img[where_mask]
 
-        labels['img'] = im
-        labels['cls'] = cls
-        labels['instances'] = instances
-        return labels
+                    target_instances = Instances.concatenate((target_instances, source_instances), axis=0)
+                    # LF - annotation['category_id'] MUST BE 0-BASED
+                    cls = np.concatenate((cls, annotation['category_id'].reshape((-1, 1))), axis=0) # LF
+                    pasted_count += 1
+            labels['img'] = target_img
+            labels['cls'] = cls
+            labels['instances'] = target_instances
+            return labels
 
+else:
+    class CopyPaste:
+
+        def __init__(self, p=0.5) -> None:
+            self.p = p
+
+        def __call__(self, labels):
+            """Implement Copy-Paste augmentation https://arxiv.org/abs/2012.07177, labels as nx5 np.array(cls, xyxy)."""
+            im = labels['img']
+            cls = labels['cls']
+            h, w = im.shape[:2]
+            instances = labels.pop('instances')
+            instances.convert_bbox(format='xyxy')
+            instances.denormalize(w, h)
+            if self.p and len(instances.segments):
+                n = len(instances)
+                _, w, _ = im.shape  # height, width, channels
+                # This is just a mask of 0 and 1
+                im_new = np.zeros(im.shape, np.uint8)
+
+                # Calculate ioa first then select indexes randomly
+                ins_flip = deepcopy(instances)
+                # Flip instances - since we will be copying from a different image, we could skip flipping altogether
+                # WE DO NOT NEED TO FLIP, maybe the implementation will be easier!
+                ins_flip.fliplr(w)
+
+                # check the docs:
+                # "bbox_ioa(boxes1, boxes2) returns a numpy array of shape (N, M)
+                # (N is the number of boxes1 and M is the number of boxes2)"
+                ioa = bbox_ioa(ins_flip.bboxes, instances.bboxes)  # intersection over area, (N, M)
+                # therefore this will return (N, ) indexes into boxes1 array
+                indexes = np.nonzero((ioa < 0.30).all(1))[0]  # (N, )
+                n = len(indexes)
+                for j in random.sample(list(indexes), k=round(self.p * n)):
+                    cls = np.concatenate((cls, cls[[j]]), axis=0)
+                    # append FLIPPED instance
+                    instances = Instances.concatenate((instances, ins_flip[[j]]), axis=0)
+                    # make a mask for an UNFLIPPED instance (the mask "im_new" will be flipped later)
+                    # NOTE: you could make mask from the flipped instance and then avoid flipping the mask later I presume
+                    cv2.drawContours(im_new, instances.segments[[j]].astype(np.int32), -1, (1, 1, 1), cv2.FILLED)
+
+                # flipped the image so that you copy from a flipped image (but "im" stays intact!)
+                result = cv2.flip(im, 1)  # augment segments (flip left-right)
+                # flipped the mask because you were adding UNFLIPPED instances
+                i = cv2.flip(im_new, 1).astype(bool)
+                # this is where the original image "im" is modified
+                # this replaces the parts of the original image with pixels from a flipped image as selected with the mask "im_new"
+                im[i] = result[i]
+
+                # THE CODE IS CONFUSING BECAUSE IT USES ONE IMAGE TO COPY FROM AND COPY INTO
+                # IN OUR IMPLEMENTATION WE WILL USE TWO DIFFERENT IMAGES
+
+            labels['img'] = im
+            labels['cls'] = cls
+            labels['instances'] = instances
+            return labels
 
 class Albumentations:
     """Albumentations transformations. Optional, uninstall package to disable.
@@ -902,3 +1060,4 @@ class ToTensor:
         im = im.half() if self.half else im.float()  # uint8 to fp16/32
         im /= 255.0  # 0-255 to 0.0-1.0
         return im
+
