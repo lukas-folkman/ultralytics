@@ -23,6 +23,7 @@ RESIZE = (640, 360) # (WIDTH, HEIGHT) or None
 if KARLO_CPA:
     import json
     from random import sample
+    from .converter import merge_multi_segment
 
     IMG_DIR = "../data/resources/GLOW_low_visibility_estuaries/images/"
     COPY_PASTE_JSON_FN = "../data/resources/GLOW_low_visibility_estuaries/GLOW_low_visibility_estuaries.json"
@@ -49,7 +50,13 @@ if KARLO_CPA:
         # LF - convert to xyxy
         bboxes[:, 2] += bboxes[:, 0]
         bboxes[:, 3] += bboxes[:, 1]
-        segments = [np.array(segment, dtype=float).reshape(-1, 2) for segment in segments]
+
+        # LF - if there are disconnected segments, merge them
+        if len(segments) > 1:
+            segments = [np.concatenate(merge_multi_segment(segments), axis=0).astype(float).reshape(-1, 2)]
+        else:
+            assert len(segments) == 1
+            segments = [np.array(segments[0], dtype=float).reshape(-1, 2)]
 
         # LF - resizing
         if RESIZE is not None:
@@ -718,7 +725,9 @@ if KARLO_CPA:
                         bbox_format='xyxy',
                         normalized=False
                     )
-                    assert len(source_instances) == 1
+                    assert len(source_instances) == 1, len(source_instances)
+                    assert len(source_instances.bboxes) == 1, source_instances.bboxes
+                    assert len(source_instances.segments) == 1, source_instances.segments
 
                     mask = np.zeros(target_img.shape[:2], dtype=np.uint8)
                     cv2.drawContours(
