@@ -1,6 +1,7 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 import copy
 import math
+import os
 import random
 from copy import deepcopy
 
@@ -25,8 +26,22 @@ if KARLO_CPA:
     from random import sample
     from .converter import merge_multi_segment
 
-    IMG_DIR = "../data/resources/GLOW_low_visibility_estuaries/images/"
-    COPY_PASTE_JSON_FN = "../data/resources/GLOW_low_visibility_estuaries/GLOW_low_visibility_estuaries.json"
+    # IMG_DIR = "../data/resources/GLOW_low_visibility_estuaries/images/"
+    # COPY_PASTE_JSON_FN = "../data/resources/GLOW_low_visibility_estuaries/GLOW_low_visibility_estuaries.json"
+    JELLIES_DIR = os.getenv('HOME') # os.path.join('data', 'lukas') # os.getenv('HOME')
+    IMG_DIR = os.path.join(JELLIES_DIR, 'jellies', 'data', 'frames', 'fish_welfare', 'Tassal_1280_blurred.LFQC')
+    COPY_PASTE_JSON_FN = os.path.join(JELLIES_DIR, 'jellies', 'data', 'annot', 'fish_welfare',
+                                      'after_QC', 'after_QC.merged.spuriousCleaned.LFQC.segments.QC.json')
+
+    CAT_FRACTIONS = [0.7242705762810278, 0.21686746987951808, 0.0588619538394542]
+
+    def unscaled_prob(cat_id, cat_fractions=CAT_FRACTIONS, t=1, strength='sqrt'):
+        if strength == 'full_balance':
+            return cat_fractions[0] / cat_fractions[int(cat_id)]
+        elif strength == 'closed_balance':
+            return min(5, cat_fractions[0] / cat_fractions[int(cat_id)])
+        elif strength == 'sqrt':
+            return max(1, np.sqrt(t / cat_fractions[int(cat_id)]))
 
     def load_image(file_path):
         image = cv2.imread(file_path)
@@ -80,17 +95,16 @@ if KARLO_CPA:
 def process_dataset(data):
     annotations_data, image_data = [], {}
     for image in data['images']:
-        file_path = f"{IMG_DIR}{image['file_name']}"
+        file_path = os.path.join(IMG_DIR, image['file_name'])
         image_pixels = load_image(file_path)
         if image_pixels is None:
             raise FileNotFoundError(f"No image found at {file_path}")
-        image_id = image['id']
-        image_data[image_id] = {
+        image_data[image['id']] = {
             'img': image_pixels,
             'file_name': image['file_name'],
             'height': image['height'],
             'width': image['width'],
-            'img_id': image_id
+            'img_id': image['id']
         }
 
     for annotation in data['annotations']:
@@ -103,6 +117,8 @@ def process_dataset(data):
                                           width=image_data[annotation['image_id']]['width'],
                                           height=image_data[annotation['image_id']]['height'])
         })
+        assert annotation['image_id'] in image_data, annotation['image_id']
+
     return annotations_data, image_data
 
 
@@ -688,63 +704,90 @@ class LetterBox:
 
 if KARLO_CPA:
     class CopyPaste:
-        def __init__(self, p=0.3): # LF
-            self.num_fishes = int(p * 10) # LF - a hack because Ultralytics requires "p" to be in the range of 0 and 1
+        def __init__(self, p=0.3, seed=None): # LF
+            self.num_fish = int(p * 10) # LF - a hack because Ultralytics requires "p" to be in the range of 0 and 1
             self.blending = False
-            self.annotations_data, self.image_data = process_dataset(load_json_data(COPY_PASTE_JSON_FN)) # LF
+            self.concat_only_boxes = True
+            self.fix_imbalance = True
+            self.random_state = np.random.RandomState(seed=seed)
+            if self.num_fish > 0:
+                print(f'KARLO_CPA enabled, num_fish: {self.num_fish}, blending: {self.blending}, concat_only_boxes: {self.concat_only_boxes}, fix_imbalance: {self.fix_imbalance}')
+                self.annotations_data, self.image_data = process_dataset(load_json_data(COPY_PASTE_JSON_FN)) # LF
+                if self.fix_imbalance:
+                    # https://arxiv.org/pdf/2012.07177
+                    # https://arxiv.org/pdf/1908.03195
+                    self.resampling_p = np.asarray([
+                        unscaled_prob(ann['category_id'], strength='closed_balance') for ann in self.annotations_data
+                    ])
+                    self.resampling_p /= np.sum(self.resampling_p)
+
+                    CAT_ID_COUNTS = [9290, 2814, 720]
+                    for cat_id in range(len(CAT_ID_COUNTS)):
+                        cat_id_mask = [int(ann['category_id']) == cat_id for ann in self.annotations_data]
+                        print('KARLO_CPA: category =', cat_id, 'P =',
+                              self.resampling_p[np.asarray(cat_id_mask)][0] * CAT_ID_COUNTS[cat_id])
+                else:
+                    self.resampling_p = None
 
         def __call__(self, labels):
-            cls = labels['cls'] # LF - to make it as similar to the original as possible
-            target_img = labels['img']
-            target_instances = labels.pop('instances') # LF - to make it as similar to the original as possible
-            h, w = target_img.shape[:2]
-            target_instances.convert_bbox(format='xyxy')
-            target_instances.denormalize(w, h)
+            im = labels['img']
+            cls = labels['cls']  # LF - to make it as similar to the original as possible
+            h, w = im.shape[:2]
+            instances = labels.pop('instances')  # LF - to make it as similar to the original as possible
+            instances.convert_bbox(format='xyxy')
+            instances.denormalize(w, h)
 
-            pasted_count = 0
-            shuffled_indices = random.sample(range(len(self.annotations_data)), len(self.annotations_data))
-            for ann_id in shuffled_indices:
-                if pasted_count >= self.num_fishes:
-                    break
+            if self.num_fish > 0:
+                pasted_count = 0
+                for ann_id in self.random_state.choice(
+                    range(len(self.annotations_data)), size=len(self.annotations_data), replace=False,
+                    p=self.resampling_p
+                ):
+                    if pasted_count >= self.num_fish:
+                        break
+                    # LF - check this first, if ioa is high, no need to copy instances
+                    ioa = None
+                    if instances.bboxes.size > 0:
+                        # LF - bbox_ioa expects both boxes in xyxy format
+                        ioa = bbox_ioa(self.annotations_data[ann_id]['instances']['bboxes'], instances.bboxes)
+                    # LF - this should happen also when instances is 0
+                    if ioa is None or np.all(ioa < 0.3):
+                        annotation = deepcopy(self.annotations_data[ann_id])
+                        cpa_img = self.image_data[annotation['img_id']]['img']
+                        cpa_instances = Instances(
+                            bboxes=annotation['instances']['bboxes'],
+                            segments=annotation['instances']['segments'],
+                            bbox_format='xyxy',
+                            normalized=False
+                        )
+                        assert len(cpa_instances) == 1, len(cpa_instances)
+                        assert len(cpa_instances.bboxes) == 1, cpa_instances.bboxes
+                        assert len(cpa_instances.segments) == 1, cpa_instances.segments
 
-                # LF - check this first, if ioa is high, no need to copy instances
-                ioa = None
-                if target_instances.bboxes.size > 0:
-                    # LF - bbox_ioa expects both boxes in xyxy format
-                    ioa = bbox_ioa(self.annotations_data[ann_id]['instances']['bboxes'], target_instances.bboxes)
-                
-                # LF - this should happen also when target_instances is 0
-                if ioa is None or np.all(ioa < 0.3):
-                    annotation = deepcopy(self.annotations_data[ann_id])
-                    img_id = annotation['img_id']
-                    source_img = self.image_data[img_id]['img']
-                    source_instances = Instances(
-                        bboxes=annotation['instances']['bboxes'],
-                        segments=annotation['instances']['segments'],
-                        bbox_format='xyxy',
-                        normalized=False
-                    )
-                    assert len(source_instances) == 1, len(source_instances)
-                    assert len(source_instances.bboxes) == 1, source_instances.bboxes
-                    assert len(source_instances.segments) == 1, source_instances.segments
+                        mask = np.zeros(im.shape[:2], dtype=np.uint8)
+                        cv2.drawContours(
+                            mask, cpa_instances.segments.astype(np.int32), -1, (255, 255, 255), cv2.FILLED)
+                        where_mask = np.where(mask)
+                        if self.blending:
+                            im[where_mask] = cv2.addWeighted(
+                                im[where_mask], 0.5, cpa_img[where_mask], 0.5, 0)
+                        else:
+                            im[where_mask] = cpa_img[where_mask]
 
-                    mask = np.zeros(target_img.shape[:2], dtype=np.uint8)
-                    cv2.drawContours(
-                        mask, source_instances.segments.astype(np.int32), -1, (255, 255, 255), cv2.FILLED)
-                    where_mask = np.where(mask)
-                    if self.blending:
-                        target_img[where_mask] = cv2.addWeighted(
-                            target_img[where_mask], 0.5, source_img[where_mask], 0.5, 0)
-                    else:
-                        target_img[where_mask] = source_img[where_mask]
+                        if self.concat_only_boxes:
+                            cpa_instances = Instances(
+                                bboxes=annotation['instances']['bboxes'],
+                                bbox_format='xyxy',
+                                normalized=False
+                            )
 
-                    target_instances = Instances.concatenate((target_instances, source_instances), axis=0)
-                    # LF - annotation['category_id'] MUST BE 0-BASED
-                    cls = np.concatenate((cls, annotation['category_id'].reshape((-1, 1))), axis=0) # LF
-                    pasted_count += 1
-            labels['img'] = target_img
+                        instances = Instances.concatenate((instances, cpa_instances), axis=0)
+                        # LF - annotation['category_id'] MUST BE 0-BASED
+                        cls = np.concatenate((cls, annotation['category_id'].reshape((-1, 1))), axis=0) # LF
+                        pasted_count += 1
+            labels['img'] = im
             labels['cls'] = cls
-            labels['instances'] = target_instances
+            labels['instances'] = instances
             return labels
 
 else:
@@ -931,7 +974,7 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
     """Convert images to a size suitable for YOLOv8 training."""
     pre_transform = Compose([
         Mosaic(dataset, imgsz=imgsz, p=hyp.mosaic),
-        CopyPaste(p=hyp.copy_paste),
+        CopyPaste(p=hyp.copy_paste) if not KARLO_CPA else CopyPaste(p=hyp.copy_paste, seed=hyp.seed),
         RandomPerspective(
             degrees=hyp.degrees,
             translate=hyp.translate,
@@ -1068,4 +1111,3 @@ class ToTensor:
         im = im.half() if self.half else im.float()  # uint8 to fp16/32
         im /= 255.0  # 0-255 to 0.0-1.0
         return im
-
