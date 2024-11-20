@@ -8,7 +8,7 @@ from typing import Tuple, Union
 import cv2
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageOps
 
 from ultralytics.data.utils import polygons2masks, polygons2masks_overlap
 from ultralytics.utils import LOGGER, colorstr
@@ -516,7 +516,7 @@ class Mosaic(BaseMixTransform):
         >>> augmented_labels = mosaic_aug(original_labels)
     """
 
-    def __init__(self, dataset, imgsz=640, p=1.0, n=4):
+    def __init__(self, dataset, imgsz=640, p=1.0, n=4, pre_transform=None, random_state: np.random.RandomState = None):
         """
         Initializes the Mosaic augmentation object.
 
@@ -536,10 +536,11 @@ class Mosaic(BaseMixTransform):
         """
         assert 0 <= p <= 1.0, f"The probability should be in range [0, 1], but got {p}."
         assert n in {4, 9}, "grid must be equal to 4 or 9."
-        super().__init__(dataset=dataset, p=p)
+        super().__init__(dataset=dataset, p=p, pre_transform=pre_transform)
         self.imgsz = imgsz
         self.border = (-imgsz // 2, -imgsz // 2)  # width, height
         self.n = n
+        self.random_state = random_state
 
     def get_indexes(self, buffer=True):
         """
@@ -562,9 +563,15 @@ class Mosaic(BaseMixTransform):
             >>> print(len(indexes))  # Output: 3
         """
         if buffer:  # select images from buffer
-            return random.choices(list(self.dataset.buffer), k=self.n - 1)
+            if self.random_state is None:
+                return random.choices(list(self.dataset.buffer), k=self.n - 1)
+            else:
+                return self.random_state.choice(list(self.dataset.buffer), size=self.n - 1)
         else:  # select any images
-            return [random.randint(0, len(self.dataset) - 1) for _ in range(self.n - 1)]
+            if self.random_state is None:
+                return [random.randint(0, len(self.dataset) - 1) for _ in range(self.n - 1)]
+            else:
+                return [self.random_state.randint(0, len(self.dataset)) for _ in range(self.n - 1)]
 
     def _mix_transform(self, labels):
         """
@@ -680,7 +687,14 @@ class Mosaic(BaseMixTransform):
         """
         mosaic_labels = []
         s = self.imgsz
-        yc, xc = (int(random.uniform(-x, 2 * s + x)) for x in self.border)  # mosaic center x, y
+
+        if self.random_state is None:
+            yc, xc = (int(random.uniform(-x, 2 * s + x)) for x in self.border)  # mosaic center x, y
+        else:
+            yc, xc = (int(self.random_state.uniform(-x, 2 * s + x)) for x in self.border)  # mosaic center x, y
+
+        # yc, xc = s, s
+
         for i in range(4):
             labels_patch = labels if i == 0 else labels["mix_labels"][i - 1]
             # Load image
@@ -983,7 +997,8 @@ class RandomPerspective:
     """
 
     def __init__(
-        self, degrees=0.0, translate=0.1, scale=0.5, shear=0.0, perspective=0.0, border=(0, 0), pre_transform=None
+        self, degrees=0.0, translate=0.1, scale=0.5, shear=0.0, perspective=0.0, border=(0, 0), pre_transform=None,
+        degrees_prob=1.0, translate_prob=1.0, scale_prob=1.0, shear_prob=1.0, perspective_prob=1.0
     ):
         """
         Initializes RandomPerspective object with transformation parameters.
@@ -1012,6 +1027,12 @@ class RandomPerspective:
         self.perspective = perspective
         self.border = border  # mosaic border
         self.pre_transform = pre_transform
+
+        self.perspective_prob = perspective_prob
+        self.degrees_prob = degrees_prob
+        self.scale_prob = scale_prob
+        self.shear_prob = shear_prob
+        self.translate_prob = translate_prob
 
     def affine_transform(self, img, border):
         """
@@ -1045,26 +1066,32 @@ class RandomPerspective:
 
         # Perspective
         P = np.eye(3, dtype=np.float32)
-        P[2, 0] = random.uniform(-self.perspective, self.perspective)  # x perspective (about y)
-        P[2, 1] = random.uniform(-self.perspective, self.perspective)  # y perspective (about x)
+        _perspective = self.perspective if random.random() < self.perspective_prob else 0
+        P[2, 0] = random.uniform(-_perspective, _perspective)  # x perspective (about y)
+        P[2, 1] = random.uniform(-_perspective, _perspective)  # y perspective (about x)
 
         # Rotation and Scale
         R = np.eye(3, dtype=np.float32)
-        a = random.uniform(-self.degrees, self.degrees)
+        _degrees = self.degrees if random.random() < self.degrees_prob else 0
+        a = random.uniform(-_degrees, _degrees)
         # a += random.choice([-180, -90, 0, 90])  # add 90deg rotations to small rotations
-        s = random.uniform(1 - self.scale, 1 + self.scale)
+
+        _scale = self.scale if random.random() < self.scale_prob else 0
+        s = random.uniform(1 - _scale, 1 + _scale)
         # s = 2 ** random.uniform(-scale, scale)
         R[:2] = cv2.getRotationMatrix2D(angle=a, center=(0, 0), scale=s)
 
         # Shear
         S = np.eye(3, dtype=np.float32)
-        S[0, 1] = math.tan(random.uniform(-self.shear, self.shear) * math.pi / 180)  # x shear (deg)
-        S[1, 0] = math.tan(random.uniform(-self.shear, self.shear) * math.pi / 180)  # y shear (deg)
+        _shear = self.shear if random.random() < self.shear_prob else 0
+        S[0, 1] = math.tan(random.uniform(-_shear, _shear) * math.pi / 180)  # x shear (deg)
+        S[1, 0] = math.tan(random.uniform(-_shear, _shear) * math.pi / 180)  # y shear (deg)
 
         # Translation
         T = np.eye(3, dtype=np.float32)
-        T[0, 2] = random.uniform(0.5 - self.translate, 0.5 + self.translate) * self.size[0]  # x translation (pixels)
-        T[1, 2] = random.uniform(0.5 - self.translate, 0.5 + self.translate) * self.size[1]  # y translation (pixels)
+        _translate = self.translate if random.random() < self.translate_prob else 0
+        T[0, 2] = random.uniform(0.5 - _translate, 0.5 + _translate) * self.size[0]  # x translation (pixels)
+        T[1, 2] = random.uniform(0.5 - _translate, 0.5 + _translate) * self.size[1]  # y translation (pixels)
 
         # Combined rotation matrix
         M = T @ S @ R @ P @ C  # order of operations (right to left) is IMPORTANT
@@ -1296,6 +1323,25 @@ class RandomPerspective:
         w2, h2 = box2[2] - box2[0], box2[3] - box2[1]
         ar = np.maximum(w2 / (h2 + eps), h2 / (w2 + eps))  # aspect ratio
         return (w2 > wh_thr) & (h2 > wh_thr) & (w2 * h2 / (w1 * h1 + eps) > area_thr) & (ar < ar_thr)  # candidates
+
+
+class Autocontrast:
+    def __init__(self, p=0.0, cutoff=0, preserve_tone=False) -> None:
+        self.p = p
+        self.cutoff = cutoff
+        self.preserve_tone = preserve_tone
+
+    def __call__(self, labels):
+        img = labels["img"] # BGR
+        if random.random() < self.p:
+            labels["img"] = np.array(
+                ImageOps.autocontrast(
+                    Image.fromarray(img[:, :, ::-1]), # convert to RGB
+                    cutoff=self.cutoff,
+                    preserve_tone=self.preserve_tone
+                )
+            )[:, :, ::-1] # convert back to BGR
+        return labels
 
 
 class RandomHSV:
@@ -1755,7 +1801,7 @@ class Albumentations:
         - Spatial transforms are handled differently and require special processing for bounding boxes.
     """
 
-    def __init__(self, p=1.0):
+    def __init__(self, p=1.0, grayscale=0.0, blur=0.0, motion_blur=0.0, blur_limit=(3, 7)):
         """
         Initialize the Albumentations transform object for YOLO bbox formatted parameters.
 
@@ -1787,12 +1833,15 @@ class Albumentations:
             - Some transforms are applied with very low probability (0.01) by default.
         """
         self.p = p
+        self.grayscale = grayscale
+        self.blur = blur
+        self.motion_blur = motion_blur
+        self.blur_limit = blur_limit
         self.transform = None
         prefix = colorstr("albumentations: ")
 
         try:
             import albumentations as A
-
             check_version(A.__version__, "1.0.3", hard=True)  # version requirement
 
             # List of possible spatial transforms
@@ -1841,13 +1890,9 @@ class Albumentations:
 
             # Transforms
             T = [
-                A.Blur(p=0.01),
-                A.MedianBlur(p=0.01),
-                A.ToGray(p=0.01),
-                A.CLAHE(p=0.01),
-                A.RandomBrightnessContrast(p=0.0),
-                A.RandomGamma(p=0.0),
-                A.ImageCompression(quality_lower=75, p=0.0),
+                A.Blur(blur_limit=self.blur_limit, p=self.blur),
+                A.MotionBlur(blur_limit=self.blur_limit, p=self.motion_blur),
+                A.ToGray(p=self.grayscale),
             ]
 
             # Compose transforms
@@ -1859,6 +1904,7 @@ class Albumentations:
             )
             LOGGER.info(prefix + ", ".join(f"{x}".replace("always_apply=False, ", "") for x in T if x.p))
         except ImportError:  # package not installed, skip
+            LOGGER.info(prefix + "not installed")
             pass
         except Exception as e:
             LOGGER.info(f"{prefix}{e}")
@@ -2301,6 +2347,11 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
         shear=hyp.shear,
         perspective=hyp.perspective,
         pre_transform=None if stretch else LetterBox(new_shape=(imgsz, imgsz)),
+        degrees_prob=hyp.degrees_prob,
+        translate_prob=hyp.translate_prob,
+        scale_prob=hyp.scale_prob,
+        shear_prob=hyp.shear_prob,
+        perspective_prob=hyp.perspective_prob
     )
 
     pre_transform = Compose([mosaic, affine])
@@ -2328,12 +2379,88 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
         [
             pre_transform,
             MixUp(dataset, pre_transform=pre_transform, p=hyp.mixup),
-            Albumentations(p=1.0),
+            Albumentations(p=1.0, grayscale=hyp.grayscale, blur=hyp.blur,
+                           motion_blur=hyp.motion_blur, blur_limit=(hyp.blur_min, hyp.blur_max)),
             RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
             RandomFlip(direction="vertical", p=hyp.flipud),
             RandomFlip(direction="horizontal", p=hyp.fliplr, flip_idx=flip_idx),
+            Autocontrast(p=hyp.autocontrast),
         ]
     )  # transforms
+
+
+def v8_transforms_reordered(dataset, imgsz, hyp, stretch=False):
+    """
+    Applies a series of image transformations for training.
+
+    This function creates a composition of image augmentation techniques to prepare images for YOLO training.
+    It includes operations such as mosaic, copy-paste, random perspective, mixup, and various color adjustments.
+
+    Args:
+        dataset (Dataset): The dataset object containing image data and annotations.
+        imgsz (int): The target image size for resizing.
+        hyp (Dict): A dictionary of hyperparameters controlling various aspects of the transformations.
+        stretch (bool): If True, applies stretching to the image. If False, uses LetterBox resizing.
+
+    Returns:
+        (Compose): A composition of image transformations to be applied to the dataset.
+
+    Examples:
+        >>> from ultralytics.data.dataset import YOLODataset
+        >>> dataset = YOLODataset(img_path="path/to/images", imgsz=640)
+        >>> hyp = {"mosaic": 1.0, "copy_paste": 0.5, "degrees": 10.0, "translate": 0.2, "scale": 0.9}
+        >>> transforms = v8_transforms(dataset, imgsz=640, hyp=hyp)
+        >>> augmented_data = transforms(dataset[0])
+    """
+
+    affine = RandomPerspective(
+        degrees=hyp.degrees, # 0
+        translate=hyp.translate, # 0.1
+        scale=hyp.scale, # 0.5
+        shear=hyp.shear, # 0
+        perspective=hyp.perspective, # 0
+        pre_transform=None if stretch else LetterBox(new_shape=(imgsz, imgsz)),
+    )
+
+    flip_idx = dataset.data.get("flip_idx", [])  # for keypoints augmentation
+    if dataset.use_keypoints:
+        kpt_shape = dataset.data.get("kpt_shape", None)
+        if len(flip_idx) == 0 and hyp.fliplr > 0.0:
+            hyp.fliplr = 0.0
+            LOGGER.warning("WARNING ⚠️ No 'flip_idx' array defined in data.yaml, setting augmentation 'fliplr=0.0'")
+        elif flip_idx and (len(flip_idx) != kpt_shape[0]):
+            raise ValueError(f"data.yaml flip_idx={flip_idx} length must be equal to kpt_shape[0]={kpt_shape[0]}")
+
+    pre_transform = Compose([
+        Albumentations(p=1.0, grayscale=hyp.grayscale, blur=hyp.blur,
+                       motion_blur=hyp.motion_blur, blur_limit=(hyp.blur_min, hyp.blur_max)),
+        RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
+        RandomFlip(direction="vertical", p=hyp.flipud),
+        RandomFlip(direction="horizontal", p=hyp.fliplr, flip_idx=flip_idx),
+        Autocontrast(p=hyp.autocontrast),
+        affine,
+    ])
+
+    pre_transform_with_mosaic = Compose([
+        pre_transform,
+        Mosaic(dataset, imgsz=imgsz, p=hyp.mosaic, pre_transform=pre_transform),
+    ])
+
+    if hyp.copy_paste_mode == "flip":
+        pre_transform_with_cp = Compose([
+            CopyPaste(p=hyp.copy_paste, mode=hyp.copy_paste_mode),
+            pre_transform_with_mosaic
+        ])
+    else:
+        pre_transform_with_cp = Compose([
+            pre_transform_with_mosaic,
+            CopyPaste(dataset, pre_transform=pre_transform_with_mosaic, p=hyp.copy_paste, mode=hyp.copy_paste_mode)
+        ])
+
+    return Compose([
+        pre_transform_with_cp,
+        MixUp(dataset, pre_transform=pre_transform_with_cp, p=hyp.mixup),
+    ])
 
 
 # Classification augmentations -----------------------------------------------------------------------------------------

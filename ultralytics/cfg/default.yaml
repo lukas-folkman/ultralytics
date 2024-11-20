@@ -125,3 +125,21 @@ cfg: # (str, optional) for overriding defaults.yaml
 
 # Tracker settings ------------------------------------------------------------------------------------------------------
 tracker: botsort.yaml # (str) tracker type, choices=[botsort.yaml, bytetrack.yaml]
+
+# LF arguments ----------------------------------------------------------------------------------------------------------
+autocontrast: 0.0 # (float) custom arguments for LF
+grayscale: 0.0 # (float) probability of converting image to grayscale
+blur: 0.0 # (float) probability of blur
+motion_blur: 0.0 # (float) probability of motion_blur
+blur_min: 3 # (int) min kernel size for blur
+blur_max: 7 # (int) max kernel size for blur
+insert_ellipses: 0.0 # (float) probability of inserting ellipses
+insert_letters: 0.0 # (float) probability of inserting letters
+turbidity: 0.0 # (float) probability of turbidity
+light_source: 0.0 # (float) probability of light source
+
+degrees_prob: 1.0 # (float) probability that the random "degrees" will be applied
+translate_prob: 1.0 # (float) probability that the random "translate" will be applied
+scale_prob: 1.0 # (float) probability that the random "scale" will be applied
+shear_prob: 1.0 # (float) probability that the random "shear" will be applied
+perspective_prob: 1.0 # (float) probability that the random "perspective" will be applied
