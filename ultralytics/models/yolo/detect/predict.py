@@ -22,6 +22,7 @@ class DetectionPredictor(BasePredictor):
 
     def postprocess(self, preds, img, orig_imgs):
         """Post-processes predictions and returns a list of Results objects."""
+        nc = ((preds[0] if isinstance(preds, (list, tuple)) else preds).shape[1] - 4)
         preds = ops.non_max_suppression(
             preds,
             self.args.conf,
@@ -29,6 +30,7 @@ class DetectionPredictor(BasePredictor):
             agnostic=self.args.agnostic_nms,
             max_det=self.args.max_det,
             classes=self.args.classes,
+            include_cls_probs=True
         )
 
         if not isinstance(orig_imgs, list):  # input images are a torch.Tensor, not a list
@@ -37,5 +39,6 @@ class DetectionPredictor(BasePredictor):
         results = []
         for pred, orig_img, img_path in zip(preds, orig_imgs, self.batch[0]):
             pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, :4], orig_img.shape)
-            results.append(Results(orig_img, path=img_path, names=self.model.names, boxes=pred))
+            results.append(Results(orig_img, path=img_path, names=self.model.names,
+                                   boxes=pred[:, :-nc], box_cls_probs=pred[:, -nc:]))
         return results

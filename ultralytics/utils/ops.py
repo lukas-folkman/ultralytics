@@ -175,6 +175,7 @@ def non_max_suppression(
     max_wh=7680,
     in_place=True,
     rotated=False,
+    include_cls_probs=False
 ):
     """
     Perform non-maximum suppression (NMS) on a set of boxes, with support for masks and multiple labels per box.
@@ -242,7 +243,7 @@ def non_max_suppression(
             prediction = torch.cat((xywh2xyxy(prediction[..., :4]), prediction[..., 4:]), dim=-1)  # xywh to xyxy
 
     t = time.time()
-    output = [torch.zeros((0, 6 + nm), device=prediction.device)] * bs
+    output = [torch.zeros((0, 6 + nm + nc), device=prediction.device)] * bs
     for xi, x in enumerate(prediction):  # image index, image inference
         # Apply constraints
         # x[((x[:, 2:4] < min_wh) | (x[:, 2:4] > max_wh)).any(1), 4] = 0  # width-height
@@ -266,20 +267,36 @@ def non_max_suppression(
         if multi_label:
             i, j = torch.where(cls > conf_thres)
             x = torch.cat((box[i], x[i, 4 + j, None], j[:, None].float(), mask[i]), 1)
+            x_cls = cls[i] if include_cls_probs else None
         else:  # best class only
             conf, j = cls.max(1, keepdim=True)
-            x = torch.cat((box, conf, j.float(), mask), 1)[conf.view(-1) > conf_thres]
+            _mask = conf.view(-1) > conf_thres
+            x = torch.cat((box, conf, j.float(), mask), 1)[_mask]
+            x_cls = cls[_mask] if include_cls_probs else None
+
+        assert not include_cls_probs or x.shape[0] == x_cls.shape[0],\
+            f"shape of x ({x.shape[0]}) and x_cls ({x_cls.shape[0]}) should be same"
 
         # Filter by class
         if classes is not None:
-            x = x[(x[:, 5:6] == classes).any(1)]
+            _mask = (x[:, 5:6] == classes).any(1)
+            x = x[_mask]
+            x_cls = x_cls[_mask] if include_cls_probs else None
+
+        assert not include_cls_probs or x.shape[0] == x_cls.shape[0],\
+            f"shape of x ({x.shape[0]}) and x_cls ({x_cls.shape[0]}) should be same"
 
         # Check shape
         n = x.shape[0]  # number of boxes
         if not n:  # no boxes
             continue
         if n > max_nms:  # excess boxes
-            x = x[x[:, 4].argsort(descending=True)[:max_nms]]  # sort by confidence and remove excess boxes
+            _mask = x[:, 4].argsort(descending=True)[:max_nms] # sort by confidence and remove excess boxes
+            x = x[_mask]
+            x_cls = x_cls[_mask] if include_cls_probs else None
+
+        assert not include_cls_probs or x.shape[0] == x_cls.shape[0],\
+            f"shape of x ({x.shape[0]}) and x_cls ({x_cls.shape[0]}) should be same"
 
         # Batched NMS
         c = x[:, 5:6] * (0 if agnostic else max_wh)  # classes
@@ -291,6 +308,11 @@ def non_max_suppression(
             boxes = x[:, :4] + c  # boxes (offset by class)
             i = torchvision.ops.nms(boxes, scores, iou_thres)  # NMS
         i = i[:max_det]  # limit detections
+
+        assert not include_cls_probs or x.shape[0] == x_cls.shape[0],\
+            f"shape of x ({x.shape[0]}) and x_cls ({x_cls.shape[0]}) should be same"
+        assert not include_cls_probs or x[i].shape[0] == x_cls[i].shape[0],\
+            f"shape of x ({x[i].shape[0]}) and x_cls ({x_cls[i].shape[0]}) should be same"
 
         # # Experimental
         # merge = False  # use merge-NMS
@@ -304,7 +326,7 @@ def non_max_suppression(
         #     if redundant:
         #         i = i[iou.sum(1) > 1]  # require redundancy
 
-        output[xi] = x[i]
+        output[xi] = (torch.cat((x, x_cls), 1) if include_cls_probs else x)[i]
         if (time.time() - t) > time_limit:
             LOGGER.warning(f"WARNING ⚠️ NMS time limit {time_limit:.3f}s exceeded")
             break  # time limit exceeded

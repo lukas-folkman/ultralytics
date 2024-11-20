@@ -228,7 +228,8 @@ class Results(SimpleClass):
     """
 
     def __init__(
-        self, orig_img, path, names, boxes=None, masks=None, probs=None, keypoints=None, obb=None, speed=None
+        self, orig_img, path, names, boxes=None, masks=None, probs=None, keypoints=None, obb=None, speed=None,
+            box_cls_probs=None
     ) -> None:
         """
         Initialize the Results class for storing and manipulating inference results.
@@ -259,7 +260,7 @@ class Results(SimpleClass):
         """
         self.orig_img = orig_img
         self.orig_shape = orig_img.shape[:2]
-        self.boxes = Boxes(boxes, self.orig_shape) if boxes is not None else None  # native size boxes
+        self.boxes = Boxes(boxes, self.orig_shape, cls_probs=box_cls_probs) if boxes is not None else None  # native size boxes
         self.masks = Masks(masks, self.orig_shape) if masks is not None else None  # native size or imgsz masks
         self.probs = Probs(probs) if probs is not None else None
         self.keypoints = Keypoints(keypoints, self.orig_shape) if keypoints is not None else None
@@ -973,7 +974,7 @@ class Boxes(BaseTensor):
         >>> print(boxes.xywhn)
     """
 
-    def __init__(self, boxes, orig_shape) -> None:
+    def __init__(self, boxes, orig_shape, cls_probs=None) -> None:
         """
         Initialize the Boxes class with detection box data and the original image shape.
 
@@ -1007,6 +1008,10 @@ class Boxes(BaseTensor):
         super().__init__(boxes, orig_shape)
         self.is_track = n == 7
         self.orig_shape = orig_shape
+        self.cls_probs = cls_probs
+        if cls_probs is not None:
+            assert cls_probs.shape[0] == self.data.shape[0],\
+                f"Number of boxes {self.data.shape} and class probabilities {cls_probs.shape} must match."
 
     @property
     def xyxy(self):
