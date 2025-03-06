@@ -1,5 +1,5 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
-
+import copy
 import math
 import random
 from copy import deepcopy
@@ -8,7 +8,7 @@ from typing import Tuple, Union
 import cv2
 import numpy as np
 import torch
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageDraw, ImageFont
 
 from ultralytics.data.utils import polygons2masks, polygons2masks_overlap
 from ultralytics.utils import LOGGER, colorstr
@@ -1332,15 +1332,108 @@ class Autocontrast:
         self.preserve_tone = preserve_tone
 
     def __call__(self, labels):
-        img = labels["img"] # BGR
         if random.random() < self.p:
-            labels["img"] = np.array(
-                ImageOps.autocontrast(
-                    Image.fromarray(img[:, :, ::-1]), # convert to RGB
-                    cutoff=self.cutoff,
-                    preserve_tone=self.preserve_tone
-                )
-            )[:, :, ::-1] # convert back to BGR
+            img = labels["img"][:, :, ::-1]  # BGR --> RGB
+            img = ImageOps.autocontrast(
+                Image.fromarray(img),
+                cutoff=self.cutoff,
+                preserve_tone=self.preserve_tone
+            )
+            labels["img"] = np.ascontiguousarray(img)[:, :, ::-1] # convert back to BGR
+        return labels
+
+def _check_overlap(x1, y1, x2, y2, xywh_list):
+    """
+    Check if a shape overlaps with any bounding box in the list.
+
+    Parameters:
+        xywh_list (list): List of bounding boxes in XYWH format.
+        x1, y1, x2, y2 (int): Coordinates of the object's bounding box.
+
+    Returns:
+        bool: True if there's an overlap, False otherwise.
+    """
+    for bx, by, bw, bh in xywh_list:
+        # Convert COCO XYWH to corner coordinates
+        bx1, by1 = bx, by
+        bx2, by2 = bx + bw, by + bh
+        # Check for overlap
+        if not (x2 < bx1 or x1 > bx2 or y2 < by1 or y1 > by2):
+            return True
+    return False
+
+
+class InsertShapes:
+    def __init__(self, p=0.0, shape_type=None, max_shapes=100, max_tries=1000, max_size=0.2) -> None:
+        assert shape_type in ['ellipses', 'letters']
+        self.p = p
+        self.shape_type = shape_type
+        self.max_shapes = max_shapes
+        self.max_tries = max_tries
+        self.max_size = max_size
+        self.grayscale_prob = 0
+
+    def __call__(self, labels):
+        if random.random() < self.p:
+            img = labels["img"][:, :, ::-1]  # BGR --> RGB
+            h, w = img.shape[:2]
+            img = Image.fromarray(img)
+            draw = ImageDraw.Draw(img)
+
+            instances = copy.deepcopy(labels["instances"])
+            assert not instances.normalized
+            instances.denormalize(w=w, h=h)
+            instances.convert_bbox(format="xyxy")
+
+            shapes = 0
+            n_shapes = random.randint(int(self.max_shapes / 2), self.max_shapes)
+            for _ in range(n_shapes):
+                color = tuple(random.randint(0, 255) for _ in range(3))
+                is_grayscale = np.random.choice([False, True], size=1, p=[1 - self.grayscale_prob, self.grayscale_prob])[0]
+                if is_grayscale:
+                    color = int(color[0] * 0.299 + color[1] * 0.587 + color[2] * 0.114)
+                    color = (color, color, color)
+                no_overlap = False
+                if self.shape_type == 'ellipses':
+                    # Random ellipses (and circles)
+                    for _ in range(self.max_tries):
+                        x1 = random.randint(0, w - 1)
+                        y1 = random.randint(0, h - 1)
+                        x2 = random.randint(x1, min(x1 + self.max_size * w, w))
+                        y2 = random.randint(y1, min(y1 + self.max_size * h, h))
+                        no_overlap = not _check_overlap(x1, y1, x2, y2, instances.bboxes)
+                        if no_overlap:
+                            break
+
+                    if no_overlap:
+                        is_circle = random.choice([True, False])
+                        filled = np.random.choice([True, False], size=1, p=[0.2, 0.8])[0]
+                        line_width = random.randint(1, 4)
+                        if is_circle:
+                            radius = min(abs(x2 - x1), abs(y2 - y1)) // 2
+                            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                            draw.ellipse([cx - radius, cy - radius, cx + radius, cy + radius], fill=color if filled else None, outline=color, width=line_width)
+                        else:
+                            draw.ellipse([x1, y1, x2, y2], fill=color if filled else None, outline=color, width=line_width)
+                        shapes += 1
+
+                else:
+                    # Random letter
+                    letter = chr(random.randint(65, 90))  # A-Z
+                    font_size = random.randint(20, self.max_size * h / 2)
+                    font = ImageFont.load_default(font_size)
+                    for _ in range(self.max_tries):
+                        x = random.randint(0, w - 1)
+                        y = random.randint(0, h - 1)
+                        x1, y1, x2, y2 = x, y, x + draw.textlength(letter, font=font), y + font_size
+                        no_overlap = not _check_overlap(x1, y1, x2, y2, instances.bboxes)
+                        if no_overlap:
+                            break
+
+                    if no_overlap:
+                        draw.text((x, y), letter, fill=color, font=font)
+                        shapes += 1
+            labels["img"] = np.ascontiguousarray(img)[:, :, ::-1]  # convert back to BGR
         return labels
 
 
@@ -2384,6 +2477,8 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
             RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
             RandomFlip(direction="vertical", p=hyp.flipud),
             RandomFlip(direction="horizontal", p=hyp.fliplr, flip_idx=flip_idx),
+            InsertShapes(p=hyp.insert_ellipses, max_shapes=hyp.max_ellipses, shape_type='ellipses'),
+            InsertShapes(p=hyp.insert_letters, max_shapes=hyp.max_letters, shape_type='letters'),
             Autocontrast(p=hyp.autocontrast),
         ]
     )  # transforms
