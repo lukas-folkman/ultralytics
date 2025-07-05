@@ -8,12 +8,18 @@ import numpy as np
 import torch.nn as nn
 
 from ultralytics.data import build_dataloader, build_yolo_dataset
+from ultralytics.data.dataset import YOLODatasetWithCustomBalancing
 from ultralytics.engine.trainer import BaseTrainer
 from ultralytics.models import yolo
 from ultralytics.nn.tasks import DetectionModel
 from ultralytics.utils import LOGGER, RANK
 from ultralytics.utils.plotting import plot_images, plot_labels, plot_results
 from ultralytics.utils.torch_utils import de_parallel, torch_distributed_zero_first
+
+
+def refresh_dataset_callback(trainer):
+    if isinstance(trainer.train_loader.dataset, YOLODatasetWithCustomBalancing):
+        trainer.train_loader.dataset.refresh_files()
 
 
 class DetectionTrainer(BaseTrainer):
@@ -29,6 +35,7 @@ class DetectionTrainer(BaseTrainer):
         trainer.train()
         ```
     """
+
 
     def build_dataset(self, img_path, mode="train", batch=None):
         """
@@ -47,6 +54,10 @@ class DetectionTrainer(BaseTrainer):
         assert mode in {"train", "val"}, f"Mode must be 'train' or 'val', not {mode}."
         with torch_distributed_zero_first(rank):  # init dataset *.cache only once if DDP
             dataset = self.build_dataset(dataset_path, mode, batch_size)
+
+        if self.args.custom_balancing:
+            self.add_callback("on_train_epoch_start", refresh_dataset_callback)
+
         shuffle = mode == "train"
         if getattr(dataset, "rect", False) and shuffle:
             LOGGER.warning("WARNING ⚠️ 'rect=True' is incompatible with DataLoader shuffle, setting shuffle=False")

@@ -145,3 +145,6 @@ translate_prob: 1.0 # (float) probability that the random "translate" will be ap
 scale_prob: 1.0 # (float) probability that the random "scale" will be applied
 shear_prob: 1.0 # (float) probability that the random "shear" will be applied
 perspective_prob: 1.0 # (float) probability that the random "perspective" will be applied
+
+custom_balancing: False
+custom_balancing_target_json: null

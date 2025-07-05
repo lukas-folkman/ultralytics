@@ -1,5 +1,6 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 
+import os
 import json
 from collections import defaultdict
 from itertools import repeat
@@ -134,6 +135,7 @@ class YOLODataset(BaseDataset):
         """Returns dictionary of labels for YOLO training."""
         self.label_files = img2label_paths(self.im_files)
         cache_path = Path(self.label_files[0]).parent.with_suffix(".cache")
+
         try:
             cache, exists = load_dataset_cache_file(cache_path), True  # attempt to load a *.cache file
             assert cache["version"] == DATASET_CACHE_VERSION  # matches current version
@@ -244,6 +246,71 @@ class YOLODataset(BaseDataset):
             new_batch["batch_idx"][i] += i  # add target image index for build_targets()
         new_batch["batch_idx"] = torch.cat(new_batch["batch_idx"], 0)
         return new_batch
+
+
+class YOLODatasetWithCustomBalancing(YOLODataset):
+    def __init__(self, *args, hyp, **kwargs):
+
+        super().__init__(*args, hyp=hyp, **kwargs)
+
+        self.target_multiple = float(hyp.custom_balancing)
+        assert self.target_multiple > 1e-3, f'custom_balancing cannot be 0 or negative {hyp.custom_balancing}'
+        self.train_mode = "train" in self.prefix
+
+        if self.train_mode:
+            with open(hyp.custom_balancing_target_json, mode='rt', encoding='UTF-8') as f:
+                self._target_filenames = json.load(f)['images']
+                self._target_filenames = [os.path.basename(img['file_name']) for img in self._target_filenames]
+                print(self._target_filenames)
+
+            def is_target(fn):
+                return os.path.basename(fn) in self._target_filenames
+
+            self.random_state = np.random.RandomState(hyp.seed)
+            self.all_im_files = self.get_img_files(self.img_path)
+            self.target_files = [fn for fn in self.all_im_files if is_target(fn)]
+            self.non_target_files = [fn for fn in self.all_im_files if not is_target(fn)]
+            assert int(self.target_multiple * len(self.target_files)) <= len(self.non_target_files), \
+                f'target_multiple too large: {self.target_multiple}'
+            self.target_probs = None  # this could be done based on under-represented categories in the future
+            self.non_target_probs = None # this could be done based on under-represented categories in the future
+            self.refresh_files()
+
+    def refresh_files(self):
+        """
+        Refreshes the list of image files for the current epoch.
+        Includes all 'prefix1' files and a random subset of 'prefix2' files.
+        """
+        if self.train_mode:
+
+            selected_target_files = self.random_state.choice(
+                self.target_files,
+                size=len(self.target_files),
+                replace=True,
+                p=self.target_probs
+            ).tolist() if self.target_probs is not None else self.target_files
+
+            selected_non_target_files = self.random_state.choice(
+                self.non_target_files,
+                size=int(self.target_multiple * len(selected_target_files)),
+                replace=False,
+                p=self.non_target_probs
+            ).tolist()
+
+            LOGGER.info(
+                f"INFO 🪼 From all ({len(self.all_im_files)}) images, selecting "
+                f"all target images ({len(selected_target_files)}) and "
+                f"a subset of non-target images ({len(selected_non_target_files)})."
+            )
+
+            self.im_files = selected_target_files + selected_non_target_files
+            self.random_state.shuffle(self.im_files)
+            # Important: After updating im_files, you need to re-initialize parts of the dataset
+            # that depend on the file list, such as labels.
+            self.labels = self.get_labels()
+            self.ni = len(self.labels)
+            if self.rect:
+                self.set_rectangle()
 
 
 class YOLOMultiModalDataset(YOLODataset):
