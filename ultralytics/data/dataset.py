@@ -314,7 +314,7 @@ class YOLODatasetWithCustomBalancing(YOLODataset):
 
             cache_path = Path(img2label_paths(self.im_files)[0]).parent.with_suffix(".cache")
             cache = load_dataset_cache_file(cache_path)
-            LOGGER.info(f'After refresh: self.im_files: {self.im_files} self.labels: {self.labels} cache: {cache["labels"]}')
+            LOGGER.info(f'After refresh: self.im_files: {len(self.im_files)} self.labels: {len(self.labels)} cache: {len(cache["labels"])}')
 
 
 class YOLOMultiModalDataset(YOLODataset):
