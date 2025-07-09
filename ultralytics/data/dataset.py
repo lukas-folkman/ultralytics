@@ -312,6 +312,10 @@ class YOLODatasetWithCustomBalancing(YOLODataset):
             if self.rect:
                 self.set_rectangle()
 
+            cache_path = Path(img2label_paths(self.im_files)[0]).parent.with_suffix(".cache")
+            cache = load_dataset_cache_file(cache_path)
+            LOGGER.info(f'After refresh: self.im_files: {self.im_files} self.labels: {self.labels} cache: {cache["labels"]}')
+
 
 class YOLOMultiModalDataset(YOLODataset):
     """

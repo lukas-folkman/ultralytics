@@ -289,6 +289,7 @@ class BaseDataset(Dataset):
 
     def get_image_and_label(self, index):
         """Get and return label information from the dataset."""
+        LOGGER.info(f"get_image_and_label {index}")
         try:
             label = deepcopy(self.labels[index])  # requires deepcopy() https://github.com/ultralytics/ultralytics/pull/1948
         except IndexError as e:
