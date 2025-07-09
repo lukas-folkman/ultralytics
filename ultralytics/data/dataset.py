@@ -261,7 +261,6 @@ class YOLODatasetWithCustomBalancing(YOLODataset):
             with open(hyp.custom_balancing_target_json, mode='rt', encoding='UTF-8') as f:
                 self._target_filenames = json.load(f)['images']
                 self._target_filenames = [os.path.basename(img['file_name']) for img in self._target_filenames]
-                print(self._target_filenames)
 
             def is_target(fn):
                 return os.path.basename(fn) in self._target_filenames
@@ -314,7 +313,7 @@ class YOLODatasetWithCustomBalancing(YOLODataset):
 
             cache_path = Path(img2label_paths(self.im_files)[0]).parent.with_suffix(".cache")
             cache = load_dataset_cache_file(cache_path)
-            LOGGER.info(f'After refresh: self.im_files: {len(self.im_files)} self.labels: {len(self.labels)} cache: {len(cache["labels"])}')
+            LOGGER.info(f'INFO 🪼 After refresh: self.im_files: {len(self.im_files)} self.labels: {len(self.labels)} cache: {len(cache["labels"])}')
 
 
 class YOLOMultiModalDataset(YOLODataset):
