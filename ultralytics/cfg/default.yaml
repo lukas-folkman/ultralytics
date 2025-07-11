@@ -149,3 +149,4 @@ perspective_prob: 1.0 # (float) probability that the random "perspective" will b
 
 custom_balancing: False
 custom_balancing_target_json: null
+backbone_lr_factor: null

@@ -23,6 +23,7 @@ from torch import nn, optim
 
 from ultralytics.cfg import get_cfg, get_save_dir
 from ultralytics.data.utils import check_cls_dataset, check_det_dataset
+from ultralytics.nn.modules.block import SPPF
 from ultralytics.nn.tasks import attempt_load_one_weight, attempt_load_weights
 from ultralytics.utils import (
     DEFAULT_CFG,
@@ -312,6 +313,7 @@ class BaseTrainer:
             momentum=self.args.momentum,
             decay=weight_decay,
             iterations=iterations,
+            backbone_lr_factor=self.args.backbone_lr_factor
         )
         # Scheduler
         self._setup_scheduler()
@@ -750,7 +752,7 @@ class BaseTrainer:
             LOGGER.info("Closing dataloader mosaic")
             self.train_loader.dataset.close_mosaic(hyp=copy(self.args))
 
-    def build_optimizer(self, model, name="auto", lr=0.001, momentum=0.9, decay=1e-5, iterations=1e5):
+    def build_optimizer(self, model, name="auto", lr=0.001, momentum=0.9, decay=1e-5, iterations=1e5, backbone_lr_factor=None):
         """
         Constructs an optimizer for the given model, based on the specified optimizer name, learning rate, momentum,
         weight decay, and number of iterations.
@@ -768,7 +770,8 @@ class BaseTrainer:
         Returns:
             (torch.optim.Optimizer): The constructed optimizer.
         """
-        g = [], [], []  # optimizer parameter groups
+
+        g = [], [], [], [], [], []  # optimizer parameter groups
         bn = tuple(v for k, v in nn.__dict__.items() if "Norm" in k)  # normalization layers, i.e. BatchNorm2d()
         if name == "auto":
             LOGGER.info(
@@ -781,15 +784,29 @@ class BaseTrainer:
             name, lr, momentum = ("SGD", 0.01, 0.9) if iterations > 10000 else ("AdamW", lr_fit, 0.9)
             self.args.warmup_bias_lr = 0.0  # no higher than 0.01 for Adam
 
+        backbone_name = None
         for module_name, module in model.named_modules():
+            if isinstance(module, SPPF):
+                if backbone_name is None:
+                    backbone_name = module_name
+                else:
+                    raise ValueError('More than one SPPF, cannot set the end of backbone')
             for param_name, param in module.named_parameters(recurse=False):
                 fullname = f"{module_name}.{param_name}" if module_name else param_name
-                if "bias" in fullname:  # bias (no decay)
-                    g[2].append(param)
-                elif isinstance(module, bn):  # weight (no decay)
-                    g[1].append(param)
-                else:  # weight (with decay)
-                    g[0].append(param)
+                if backbone_lr_factor is not None and (backbone_name is None or module_name.startswith(backbone_name)):
+                    if "bias" in fullname:  # bias (no decay)
+                        g[5].append(param)
+                    elif isinstance(module, bn):  # weight (no decay)
+                        g[4].append(param)
+                    else:  # weight (with decay)
+                        g[3].append(param)
+                else:
+                    if "bias" in fullname:  # bias (no decay)
+                        g[2].append(param)
+                    elif isinstance(module, bn):  # weight (no decay)
+                        g[1].append(param)
+                    else:  # weight (with decay)
+                        g[0].append(param)
 
         optimizers = {"Adam", "Adamax", "AdamW", "NAdam", "RAdam", "RMSProp", "SGD", "auto"}
         name = {x.lower(): x for x in optimizers}.get(name.lower(), None)
@@ -807,8 +824,13 @@ class BaseTrainer:
 
         optimizer.add_param_group({"params": g[0], "weight_decay": decay})  # add g0 with weight_decay
         optimizer.add_param_group({"params": g[1], "weight_decay": 0.0})  # add g1 (BatchNorm2d weights)
+        if backbone_lr_factor is not None:
+            optimizer.add_param_group({"params": g[3], "weight_decay": decay, "lr": lr / backbone_lr_factor})
+            optimizer.add_param_group({"params": g[4], "weight_decay": 0.0, "lr": lr / backbone_lr_factor})
+            optimizer.add_param_group({"params": g[5], "weight_decay": 0.0, "lr": lr / backbone_lr_factor})
         LOGGER.info(
             f"{colorstr('optimizer:')} {type(optimizer).__name__}(lr={lr}, momentum={momentum}) with parameter groups "
-            f'{len(g[1])} weight(decay=0.0), {len(g[0])} weight(decay={decay}), {len(g[2])} bias(decay=0.0)'
+            f"{len(g[1])} batch-norm, {len(g[0])} bias, {len(g[2])} weights {f' {len(g[3])} {len(g[4])} {len(g[5])} backbone' if backbone_lr_factor is not None else ''}"
+
         )
         return optimizer
