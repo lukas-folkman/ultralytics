@@ -24,6 +24,9 @@ from torch import nn, optim
 from ultralytics.cfg import get_cfg, get_save_dir
 from ultralytics.data.utils import check_cls_dataset, check_det_dataset
 from ultralytics.nn.modules.block import SPPF
+from ultralytics.nn.modules.block import HGBlock
+from ultralytics.nn.modules.conv import Conv, DWConv
+from ultralytics.nn.modules.transformer import AIFI
 from ultralytics.nn.tasks import attempt_load_one_weight, attempt_load_weights
 from ultralytics.utils import (
     DEFAULT_CFG,
@@ -784,16 +787,48 @@ class BaseTrainer:
             name, lr, momentum = ("SGD", 0.01, 0.9) if iterations > 10000 else ("AdamW", lr_fit, 0.9)
             self.args.warmup_bias_lr = 0.0  # no higher than 0.01 for Adam
 
-        backbone_name = None
+        _module_numbers, start_of_neck_rtdetr = [], None
         for module_name, module in model.named_modules():
+            if '.' in module_name:
+                _a, _n = module_name.split('.')[:2]
+                assert _a == 'model'
+                _n = int(_n)
+                if isinstance(module, AIFI):
+                    start_of_neck_rtdetr = _n - 1
+                    break
+
+        backbone_last_block, yolo_backbone = None, None
+        for module_name, module in model.named_modules():
+
             if isinstance(module, SPPF):
-                if backbone_name is None:
-                    backbone_name = module_name
+                assert yolo_backbone is None or yolo_backbone
+                yolo_backbone = True
+                if backbone_last_block is None:
+                    backbone_last_block = module_name
                 else:
                     raise ValueError('More than one SPPF, cannot set the end of backbone')
+
+            if isinstance(module, HGBlock):
+                assert yolo_backbone is None or not yolo_backbone
+                yolo_backbone = False
+
+            assert start_of_neck_rtdetr in [None, 10, 14], start_of_neck_rtdetr
+            if start_of_neck_rtdetr is not None and '.' in module_name:
+                _a, _n = module_name.split('.')[:2]
+                assert _a == 'model'
+                _n = int(_n)
+                if _n == start_of_neck_rtdetr:
+                    backbone_last_block = "THIS_IS_NOT_BACKBONE_ANYMORE"
+
+            if backbone_lr_factor is not None:
+                if backbone_last_block is None or module_name.startswith(backbone_last_block):
+                    LOGGER.info(f"BACKBONE: {module_name}")
+                else:
+                    LOGGER.info(f"NECK/HEAD: {module_name}")
+
             for param_name, param in module.named_parameters(recurse=False):
                 fullname = f"{module_name}.{param_name}" if module_name else param_name
-                if backbone_lr_factor is not None and (backbone_name is None or module_name.startswith(backbone_name)):
+                if backbone_lr_factor is not None and (backbone_last_block is None or module_name.startswith(backbone_last_block)):
                     if "bias" in fullname:  # bias (no decay)
                         g[5].append(param)
                     elif isinstance(module, bn):  # weight (no decay)
