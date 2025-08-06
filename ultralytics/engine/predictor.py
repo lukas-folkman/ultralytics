@@ -48,9 +48,6 @@ from ultralytics.utils.checks import check_imgsz, check_imshow
 from ultralytics.utils.files import increment_path
 from ultralytics.utils.torch_utils import select_device, smart_inference_mode
 
-# NEW
-from ultralytics.engine.results import Results
-
 STREAM_WARNING = """
 WARNING ⚠️ inference results will accumulate in RAM unless `stream=True` is passed, causing potential out-of-memory
 errors for large sources or long-running streams and videos. See https://docs.ultralytics.com/modes/predict/ for help.
@@ -159,13 +156,7 @@ class BasePredictor:
         letterbox = LetterBox(self.imgsz, auto=same_shapes and self.model.pt, stride=self.model.stride)
         return [letterbox(image=x) for x in im]
 
-    # ORIGINAL
-    # def postprocess(self, preds, img, orig_imgs):
-    #     """Post-processes predictions for an image and returns them."""
-    #     return preds
-
-    # NEW
-    def postprocess(self, preds):
+    def postprocess(self, preds, img, orig_imgs):
         """Post-processes predictions for an image and returns them."""
         return preds
 
@@ -266,27 +257,9 @@ class BasePredictor:
                         yield from [preds] if isinstance(preds, torch.Tensor) else preds  # yield embedding tensors
                         continue
 
-                # ORIGINAL
                 # Postprocess
-                # with profilers[2]:
-                #     self.results = self.postprocess(preds, im, im0s)
-
-                # NEW
-                # Postprocess
-                nc = ((preds[0] if isinstance(preds, (list, tuple)) else preds).shape[1] - 4)
                 with profilers[2]:
-                    # Only NMS
-                    preds = self.postprocess(preds)
-
-                if not isinstance(im0s, list):  # input images are a torch.Tensor, not a list
-                    im0s = ops.convert_torch2numpy_batch(im0s)
-                self.results = []
-                for pred, orig_img, img_path in zip(preds, im0s, self.batch[0]):
-                    pred[:, :4] = ops.scale_boxes(im.shape[2:], pred[:, :4], orig_img.shape)
-                    self.results.append(Results(orig_img, path=img_path, names=self.model.names,
-                                           boxes=pred[:, :-nc], box_cls_probs=pred[:, -nc:]))
-                ##
-
+                    self.results = self.postprocess(preds, im, im0s)
                 self.run_callbacks("on_predict_postprocess_end")
 
                 # Visualize, save, write results
@@ -317,12 +290,8 @@ class BasePredictor:
         if self.args.verbose and self.seen:
             t = tuple(x.t / self.seen * 1e3 for x in profilers)  # speeds per image
             LOGGER.info(
-                f"Speed: %.1f ms preprocess, %.1f ms inference, %.1f ms postprocess per image at shape "
+                f"Speed: %.1fms preprocess, %.1fms inference, %.1fms postprocess per image at shape "
                 f"{(min(self.args.batch, self.seen), 3, *im.shape[2:])}" % t
-            )
-            # NEW
-            LOGGER.info(
-                f"Speed: {(profilers[1].t / self.seen) + (profilers[2].t / self.seen):.7f} s inference+NMS per image"
             )
         if self.args.save or self.args.save_txt or self.args.save_crop:
             nl = len(list(self.save_dir.glob("labels/*.txt")))  # number of labels
