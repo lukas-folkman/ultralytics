@@ -133,6 +133,23 @@ copy_paste_mode: flip # (str) copy-paste strategy for segment/obb: flip or mixup
 auto_augment: randaugment # (str) classification auto augmentation policy: randaugment, autoaugment, augmix
 erasing: 0.4 # (float) random erasing probability for classification (0.0–1.0)
 
+# LF fork: custom augmentations ----------------------------------------------------------------------------------------
+autocontrast: 0.0 # (float) probability of applying PIL autocontrast
+insert_ellipses: 0.0 # (float) probability of inserting random ellipses/circles
+max_ellipses: 10 # (int) max number of inserted ellipses
+insert_letters: 0.0 # (float) probability of inserting random letters
+max_letters: 10 # (int) max number of inserted letters
+degrees_prob: 1.0 # (float) probability that the random "degrees" rotation is applied
+translate_prob: 1.0 # (float) probability that the random "translate" is applied
+scale_prob: 1.0 # (float) probability that the random "scale" is applied
+shear_prob: 1.0 # (float) probability that the random "shear" is applied
+perspective_prob: 1.0 # (float) probability that the random "perspective" is applied
+
+# LF fork: training extensions -----------------------------------------------------------------------------------------
+custom_balancing: False # (bool | float) per-epoch dataset balancing; float = non-target/target multiple
+custom_balancing_target_json: # (str, optional) COCO-style json listing target images for custom_balancing
+backbone_lr_factor: # (float, optional) divide backbone learning rate by this factor
+
 # Custom config.yaml ---------------------------------------------------------------------------------------------------
 cfg: # (str, optional) path to a config.yaml that overrides defaults
 

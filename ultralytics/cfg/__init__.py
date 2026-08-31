@@ -247,6 +247,14 @@ CFG_FRACTION_KEYS = frozenset(
         "fraction",
         "multi_scale",
         "dlam",
+        "autocontrast",
+        "insert_ellipses",
+        "insert_letters",
+        "degrees_prob",
+        "translate_prob",
+        "scale_prob",
+        "shear_prob",
+        "perspective_prob",
     }
 )
 CFG_INT_KEYS = frozenset(
@@ -262,6 +270,8 @@ CFG_INT_KEYS = frozenset(
         "line_width",
         "nbs",
         "save_period",
+        "max_ellipses",
+        "max_letters",
     }
 )
 CFG_INT_MIN = {  # minimum valid values for integer arguments used as divisors, sizes or seeds
