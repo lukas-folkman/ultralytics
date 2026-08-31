@@ -309,6 +309,7 @@ class BaseTrainer:
             momentum=self.args.momentum,
             decay=weight_decay,
             iterations=iterations,
+            backbone_lr_factor=self.args.backbone_lr_factor,
         )
         self._setup_scheduler()
 
@@ -1084,7 +1085,34 @@ class BaseTrainer:
             LOGGER.info("Closing dataloader mosaic")
             self.train_loader.dataset.close_mosaic(hyp=copy(self.args))
 
-    def build_optimizer(self, model, name="auto", lr=0.001, momentum=0.9, decay=1e-5, iterations=1e5):
+    @staticmethod
+    def _backbone_module_indices(model):
+        """Return the set of top-level `model.N` indices belonging to the backbone (LF fork).
+
+        The YOLO backbone ends at (and includes) the single SPPF block; the RT-DETR backbone ends just before the
+        module preceding AIFI (the start of the hybrid encoder neck).
+
+        Returns:
+            (set[int]): Top-level indices of backbone modules.
+        """
+        from ultralytics.nn.modules import AIFI, SPPF
+
+        seq = unwrap_model(model).model
+        sppf_idx = aifi_idx = None
+        for i, m in enumerate(seq):
+            if isinstance(m, AIFI) and aifi_idx is None:
+                aifi_idx = i
+            if isinstance(m, SPPF):
+                if sppf_idx is not None:
+                    raise ValueError("More than one SPPF module found, cannot determine the end of the backbone")
+                sppf_idx = i
+        if aifi_idx is not None:  # RT-DETR: neck starts at the module before AIFI
+            return set(range(max(aifi_idx - 1, 0)))
+        if sppf_idx is not None:  # YOLO: backbone ends at (and includes) SPPF
+            return set(range(sppf_idx + 1))
+        raise ValueError("Could not locate SPPF (YOLO) or AIFI (RT-DETR) to determine the backbone boundary")
+
+    def build_optimizer(self, model, name="auto", lr=0.001, momentum=0.9, decay=1e-5, iterations=1e5, backbone_lr_factor=None):
         """Construct an optimizer for the given model.
 
         Args:
@@ -1095,6 +1123,8 @@ class BaseTrainer:
             momentum (float, optional): The momentum factor for the optimizer.
             decay (float, optional): The weight decay for the optimizer.
             iterations (float, optional): The number of iterations, which determines the optimizer if name is 'auto'.
+            backbone_lr_factor (float, optional): If set, backbone parameters train at lr / backbone_lr_factor
+                (LF fork). Not supported with the MuSGD optimizer.
 
         Returns:
             (torch.optim.Optimizer): The constructed optimizer.
@@ -1115,18 +1145,30 @@ class BaseTrainer:
             self.args.warmup_bias_lr = 0.0  # no higher than 0.01 for Adam
 
         use_muon = name == "MuSGD"
+        if backbone_lr_factor is not None and use_muon:
+            raise ValueError(
+                "backbone_lr_factor is not supported with the MuSGD optimizer (including 'optimizer=auto' for long "
+                "trainings). Set an explicit optimizer, e.g. optimizer=SGD or optimizer=AdamW."
+            )
+        backbone_idx = self._backbone_module_indices(model) if backbone_lr_factor is not None else None
+        gb = [{}, {}, {}]  # backbone parameter groups (weight, bn, bias) at reduced lr
         for module_name, module in unwrap_model(model).named_modules():
+            is_backbone = False
+            if backbone_idx is not None and module_name.startswith("model."):
+                idx = module_name.split(".")[1]
+                is_backbone = idx.isdigit() and int(idx) in backbone_idx
+            target = gb if is_backbone else g
             for param_name, param in module.named_parameters(recurse=False):
                 fullname = f"{module_name}.{param_name}" if module_name else param_name
                 if param.ndim in {2, 4} and use_muon:  # muon only orthogonalizes matrices and conv filters
                     g[3][fullname] = param  # muon params
                 elif "bias" in fullname:  # bias (no decay)
-                    g[2][fullname] = param
+                    target[2][fullname] = param
                 elif isinstance(module, bn) or "logit_scale" in fullname:  # weight (no decay)
                     # ContrastiveHead and BNContrastiveHead included here with 'logit_scale'
-                    g[1][fullname] = param
+                    target[1][fullname] = param
                 else:  # weight (with decay)
-                    g[0][fullname] = param
+                    target[0][fullname] = param
         if not use_muon:
             g = [x.values() for x in g[:3]]  # convert to list of params
 
@@ -1163,11 +1205,21 @@ class BaseTrainer:
                     (p1 if id(v) in boosted or "proto.semseg" in k or "SemanticSegment" in k else p2).append(v)
                 g_.extend([{"params": p1, **x, "lr": lr * 3}, {"params": p2, **x}])
             g = g_
+        backbone_msg = ""
+        if backbone_lr_factor is not None:
+            backbone_lr = lr / backbone_lr_factor
+            g.append({"params": list(gb[0].values()), **optim_args, "lr": backbone_lr, "weight_decay": decay, "param_group": "backbone_weight"})
+            g.append({"params": list(gb[1].values()), **optim_args, "lr": backbone_lr, "weight_decay": 0.0, "param_group": "backbone_bn"})
+            g.append({"params": list(gb[2].values()), **optim_args, "lr": backbone_lr, "weight_decay": 0.0, "param_group": "backbone_bias"})
+            backbone_msg = (
+                f", {len(gb[0])}+{len(gb[1])}+{len(gb[2])} backbone weight+bn+bias(lr={backbone_lr:.6g})"
+            )
         optimizer = (partial(MuSGD, muon=muon, sgd=sgd) if use_muon else getattr(optim, name))(params=g)
 
         LOGGER.info(
             f"{colorstr('optimizer:')} {type(optimizer).__name__}(lr={lr}, momentum={momentum}) with parameter groups "
             f"{num_params[1]} weight(decay=0.0), {num_params[0]} weight(decay={decay}), {num_params[2]} bias(decay=0.0)"
+            f"{backbone_msg}"
         )
         return optimizer
 
