@@ -12,6 +12,7 @@ import torch
 from torch import nn
 
 from ultralytics.data import build_dataloader, build_yolo_dataset
+from ultralytics.data.dataset import YOLODatasetWithCustomBalancing
 from ultralytics.engine.trainer import BaseTrainer
 from ultralytics.models import yolo
 from ultralytics.nn.tasks import DetectionModel
@@ -19,6 +20,14 @@ from ultralytics.utils import DEFAULT_CFG, LOGGER, RANK
 from ultralytics.utils.patches import override_configs
 from ultralytics.utils.plotting import plot_images, plot_labels
 from ultralytics.utils.torch_utils import torch_distributed_zero_first, unwrap_model
+
+
+def refresh_dataset_callback(trainer):
+    """Resample a YOLODatasetWithCustomBalancing at each epoch start and restart dataloader workers (LF fork)."""
+    dataset = trainer.train_loader.dataset
+    if isinstance(dataset, YOLODatasetWithCustomBalancing):
+        dataset.refresh_files()
+        trainer.train_loader.reset()  # rebuild worker iterators so they see the new file list
 
 
 class DetectionTrainer(BaseTrainer):
@@ -90,6 +99,8 @@ class DetectionTrainer(BaseTrainer):
         assert mode in {"train", "val"}, f"Mode must be 'train' or 'val', not {mode}."
         with torch_distributed_zero_first(rank):  # init dataset *.cache only once if DDP
             dataset = self.build_dataset(dataset_path, mode, batch_size)
+        if mode == "train" and self.args.custom_balancing and refresh_dataset_callback not in self.callbacks.get("on_train_epoch_start", []):
+            self.add_callback("on_train_epoch_start", refresh_dataset_callback)
         shuffle = mode == "train"
         if getattr(dataset, "rect", False) and shuffle and not np.all(dataset.batch_shapes == dataset.batch_shapes[0]):
             LOGGER.warning("'rect=True' is incompatible with DataLoader shuffle, setting shuffle=False")

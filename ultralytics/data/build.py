@@ -24,6 +24,7 @@ from ultralytics.data.dataset import (
     PolygonSemanticDataset,
     SemanticDataset,
     YOLODataset,
+    YOLODatasetWithCustomBalancing,
     YOLOMultiModalDataset,
 )
 from ultralytics.data.loaders import (
@@ -260,6 +261,8 @@ def build_yolo_dataset(
         pad = 0.0  # no pad for semantic
     elif multi_modal:
         dataset = YOLOMultiModalDataset
+    elif getattr(cfg, "custom_balancing", False) and mode == "train":
+        dataset = YOLODatasetWithCustomBalancing
     else:
         dataset = YOLODataset
 

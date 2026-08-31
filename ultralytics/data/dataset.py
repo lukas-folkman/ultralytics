@@ -436,6 +436,68 @@ class YOLODataset(BaseDataset):
         return new_batch
 
 
+class YOLODatasetWithCustomBalancing(YOLODataset):
+    """YOLODataset with per-epoch re-balancing between target and non-target images (LF fork).
+
+    Every epoch keeps all "target" images (those listed in a COCO-style json, hyp.custom_balancing_target_json) and a
+    random subset of the remaining images sized ``hyp.custom_balancing * n_targets``. The resampled epoch length is
+    constant, so the dataloader length stays valid; ``refresh_files()`` must be followed by ``train_loader.reset()`` so
+    worker processes pick up the new file list (see ``refresh_dataset_callback`` in models/yolo/detect/train.py).
+    """
+
+    def __init__(self, *args, hyp, **kwargs):
+        """Initialize the dataset and perform the first balanced resampling for training splits."""
+        super().__init__(*args, hyp=hyp, **kwargs)
+
+        self.target_multiple = float(hyp.custom_balancing)
+        assert self.target_multiple > 1e-3, f"custom_balancing cannot be 0 or negative: {hyp.custom_balancing}"
+        self.train_mode = "train" in self.prefix
+
+        if self.train_mode:
+            if self.cache == "ram":
+                raise ValueError(
+                    "custom_balancing is incompatible with cache='ram': the RAM image cache is indexed positionally "
+                    "and would serve wrong images after resampling. Use cache=False or cache='disk'."
+                )
+            with open(hyp.custom_balancing_target_json, encoding="utf-8") as f:
+                target_filenames = {Path(img["file_name"]).name for img in json.load(f)["images"]}
+
+            self.random_state = np.random.RandomState(hyp.seed)
+            # Full universe of (im_file, label) after base-class init; labels are subset views of this on refresh
+            self.all_im_files = list(self.im_files)
+            self._label_map = dict(zip(self.im_files, self.labels))
+            self.target_files = [f for f in self.all_im_files if Path(f).name in target_filenames]
+            self.non_target_files = [f for f in self.all_im_files if Path(f).name not in target_filenames]
+            assert len(self.target_files), "custom_balancing_target_json matched no images in the training set"
+            assert int(self.target_multiple * len(self.target_files)) <= len(self.non_target_files), (
+                f"target_multiple too large: {self.target_multiple}"
+            )
+            self.refresh_files()
+
+    def refresh_files(self):
+        """Resample the epoch file list: all target images plus a random subset of non-target images."""
+        if not self.train_mode:
+            return
+        selected_non_target = self.random_state.choice(
+            self.non_target_files, size=int(self.target_multiple * len(self.target_files)), replace=False
+        ).tolist()
+        LOGGER.info(
+            f"custom_balancing: from all ({len(self.all_im_files)}) images, selecting all target images "
+            f"({len(self.target_files)}) and a subset of non-target images ({len(selected_non_target)})."
+        )
+        self.im_files = self.target_files + selected_non_target
+        self.random_state.shuffle(self.im_files)
+        self.labels = [self._label_map[f] for f in self.im_files]
+        self.ni = len(self.labels)
+        # Reset every positional per-image structure sized to ni (see BaseDataset.__init__)
+        self.buffer = []
+        self.max_buffer_length = min((self.ni, self.batch_size * 8, 1000)) if self.augment else 0
+        self.ims, self.im_hw0, self.im_hw = [None] * self.ni, [None] * self.ni, [None] * self.ni
+        self.npy_files = [Path(f).with_suffix(".npy") for f in self.im_files]
+        if self.rect:
+            self.set_rectangle()
+
+
 class DepthDataset(YOLODataset):
     """Dataset for monocular depth estimation with paired RGB + depth map loading.
 
