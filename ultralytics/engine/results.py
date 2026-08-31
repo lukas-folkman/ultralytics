@@ -987,11 +987,49 @@ class Boxes(BaseTensor):
         super().__init__(boxes, orig_shape)
         self.is_track = n == 7
         self.orig_shape = orig_shape
+        # Note: boxes set via Results.update() (e.g. by trackers, which reorder/drop detections) carry no cls_probs
         self.cls_probs = cls_probs
         if cls_probs is not None:
             assert cls_probs.shape[0] == self.data.shape[0], (
                 f"Number of boxes {self.data.shape} and class probabilities {cls_probs.shape} must match."
             )
+
+    def _new(self, data, cls_probs):
+        """Construct a new Boxes carrying cls_probs alongside the box data (LF fork)."""
+        return self.__class__(data, self.orig_shape, cls_probs=cls_probs)
+
+    def cpu(self):
+        """Return a copy of the object with all tensors on CPU memory, including cls_probs."""
+        if isinstance(self.data, np.ndarray):
+            return self
+        return self._new(self.data.cpu(), self.cls_probs.cpu() if self.cls_probs is not None else None)
+
+    def numpy(self):
+        """Return a copy of the object with all tensors as numpy arrays, including cls_probs."""
+        if isinstance(self.data, np.ndarray):
+            return self
+        cp = self.cls_probs
+        return self._new(self.data.numpy(), cp.cpu().numpy() if isinstance(cp, torch.Tensor) else cp)
+
+    def cuda(self):
+        """Return a copy of the object with all tensors on GPU memory, including cls_probs."""
+        cp = self.cls_probs
+        return self._new(torch.as_tensor(self.data).cuda(), torch.as_tensor(cp).cuda() if cp is not None else None)
+
+    def to(self, *args, **kwargs):
+        """Return a copy of the object with tensors moved to the specified device/dtype, including cls_probs."""
+        cp = self.cls_probs
+        return self._new(
+            torch.as_tensor(self.data).to(*args, **kwargs),
+            torch.as_tensor(cp).to(*args, **kwargs) if cp is not None else None,
+        )
+
+    def __getitem__(self, idx):
+        """Return a new Boxes object with the indexed boxes and matching cls_probs rows."""
+        cp = self.cls_probs[idx] if self.cls_probs is not None else None
+        if cp is not None and cp.ndim == 1:  # int index: __init__ unsqueezes 1-D box data, match that
+            cp = cp[None]
+        return self._new(self.data[idx], cp)
 
     @property
     def xyxy(self) -> torch.Tensor | np.ndarray:
