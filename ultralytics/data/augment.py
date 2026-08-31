@@ -10,7 +10,7 @@ from typing import Any
 import cv2
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 from torch.nn import functional as F
 
 from ultralytics.data.utils import polygons2masks, polygons2masks_overlap
@@ -1090,6 +1090,11 @@ class RandomPerspective(BaseTransform):
         perspective: float = 0.0,
         size: tuple[int, int] | None = None,
         preserve_obb: bool = False,
+        degrees_prob: float = 1.0,
+        translate_prob: float = 1.0,
+        scale_prob: float = 1.0,
+        shear_prob: float = 1.0,
+        perspective_prob: float = 1.0,
     ):
         """Initialize RandomPerspective object with transformation parameters.
 
@@ -1105,6 +1110,11 @@ class RandomPerspective(BaseTransform):
             perspective (float): Perspective distortion factor.
             size (tuple[int, int] | None): Output size (width, height). If None, uses the input image size.
             preserve_obb (bool): Preserve oriented-box direction when transformed segments cross image boundaries.
+            degrees_prob (float): Probability that the random rotation is applied at all.
+            translate_prob (float): Probability that the random translation is applied at all.
+            scale_prob (float): Probability that the random scaling is applied at all.
+            shear_prob (float): Probability that the random shear is applied at all.
+            perspective_prob (float): Probability that the random perspective distortion is applied at all.
         """
         self.degrees = degrees
         self.translate = translate
@@ -1113,6 +1123,11 @@ class RandomPerspective(BaseTransform):
         self.perspective = perspective
         self.size = size
         self.preserve_obb = preserve_obb
+        self.degrees_prob = degrees_prob
+        self.translate_prob = translate_prob
+        self.scale_prob = scale_prob
+        self.shear_prob = shear_prob
+        self.perspective_prob = perspective_prob
 
     def _compute_affine_matrix(self, img: np.ndarray, size: tuple[int, int]) -> tuple[np.ndarray, float]:
         """Compute the affine transformation matrix without applying it.
@@ -1129,15 +1144,20 @@ class RandomPerspective(BaseTransform):
         C[0, 2] = -img.shape[1] / 2  # x translation (pixels)
         C[1, 2] = -img.shape[0] / 2  # y translation (pixels)
 
-        # Perspective
+        # Perspective (each component may be probabilistically disabled for this call via its *_prob;
+        # a disabled perspective keeps M's last row [0, 0, 1] so the warpPerspective path stays exact)
         P = np.eye(3, dtype=np.float32)
-        P[2, 0] = random.uniform(-self.perspective, self.perspective)  # x perspective (about y)
-        P[2, 1] = random.uniform(-self.perspective, self.perspective)  # y perspective (about x)
+        perspective = self.perspective if random.random() < self.perspective_prob else 0
+        P[2, 0] = random.uniform(-perspective, perspective)  # x perspective (about y)
+        P[2, 1] = random.uniform(-perspective, perspective)  # y perspective (about x)
 
         # Rotation and Scale
         R = np.eye(3, dtype=np.float32)
-        a = random.uniform(-self.degrees, self.degrees)
-        if isinstance(self.scale, (tuple, list)):
+        degrees = self.degrees if random.random() < self.degrees_prob else 0
+        a = random.uniform(-degrees, degrees)
+        if random.random() >= self.scale_prob:
+            s = 1.0
+        elif isinstance(self.scale, (tuple, list)):
             s = random.uniform(self.scale[0], self.scale[1])
         else:
             s = random.uniform(1 - self.scale, 1 + self.scale)
@@ -1145,14 +1165,16 @@ class RandomPerspective(BaseTransform):
 
         # Shear
         S = np.eye(3, dtype=np.float32)
-        S[0, 1] = math.tan(random.uniform(-self.shear, self.shear) * math.pi / 180)  # x shear (deg)
-        S[1, 0] = math.tan(random.uniform(-self.shear, self.shear) * math.pi / 180)  # y shear (deg)
+        shear = self.shear if random.random() < self.shear_prob else 0
+        S[0, 1] = math.tan(random.uniform(-shear, shear) * math.pi / 180)  # x shear (deg)
+        S[1, 0] = math.tan(random.uniform(-shear, shear) * math.pi / 180)  # y shear (deg)
 
         # Translation
         T = np.eye(3, dtype=np.float32)
 
-        T[0, 2] = random.uniform(0.5 - self.translate, 0.5 + self.translate) * size[0]  # x translation (pixels)
-        T[1, 2] = random.uniform(0.5 - self.translate, 0.5 + self.translate) * size[1]  # y translation (pixels)
+        translate = self.translate if random.random() < self.translate_prob else 0
+        T[0, 2] = random.uniform(0.5 - translate, 0.5 + translate) * size[0]  # x translation (pixels)
+        T[1, 2] = random.uniform(0.5 - translate, 0.5 + translate) * size[1]  # y translation (pixels)
 
         # Combined rotation matrix
         M = T @ S @ R @ P @ C  # order of operations (right to left) is IMPORTANT
@@ -2770,6 +2792,98 @@ class RandomLoadText(BaseTransform):
         return labels
 
 
+class Autocontrast:
+    """Apply PIL autocontrast to the image with probability p (LF fork)."""
+
+    def __init__(self, p: float = 0.0, cutoff: int = 0, preserve_tone: bool = False) -> None:
+        """Initialize with application probability, histogram cutoff percent, and tone preservation flag."""
+        self.p = p
+        self.cutoff = cutoff
+        self.preserve_tone = preserve_tone
+
+    def __call__(self, labels):
+        """Apply autocontrast to labels['img'] (BGR) with probability p."""
+        if random.random() < self.p:
+            img = labels["img"][:, :, ::-1]  # BGR --> RGB
+            img = ImageOps.autocontrast(Image.fromarray(img), cutoff=self.cutoff, preserve_tone=self.preserve_tone)
+            labels["img"] = np.ascontiguousarray(img)[:, :, ::-1]  # convert back to BGR
+        return labels
+
+
+def _check_overlap(x1, y1, x2, y2, xyxy_list):
+    """Return True if box (x1, y1, x2, y2) overlaps any box in xyxy_list (xyxy format)."""
+    for bx1, by1, bx2, by2 in xyxy_list:
+        if not (x2 < bx1 or x1 > bx2 or y2 < by1 or y1 > by2):
+            return True
+    return False
+
+
+class InsertShapes:
+    """Insert random distractor shapes (ellipses/circles or letters) that avoid ground-truth boxes (LF fork)."""
+
+    def __init__(self, p: float = 0.0, shape_type: str = None, max_shapes: int = 100, max_tries: int = 1000, max_size: float = 0.2) -> None:
+        """Initialize with application probability, shape type ('ellipses' or 'letters'), and size/count limits."""
+        assert shape_type in {"ellipses", "letters"}
+        self.p = p
+        self.shape_type = shape_type
+        self.max_shapes = max_shapes
+        self.max_tries = max_tries
+        self.max_size = max_size
+
+    def __call__(self, labels):
+        """Draw random non-overlapping shapes onto labels['img'] with probability p."""
+        if random.random() >= self.p:
+            return labels
+        img = labels["img"][:, :, ::-1]  # BGR --> RGB
+        h, w = img.shape[:2]
+        img = Image.fromarray(img)
+        draw = ImageDraw.Draw(img)
+
+        instances = deepcopy(labels["instances"])
+        instances.convert_bbox(format="xyxy")
+        instances.denormalize(w=w, h=h)  # no-op if already denormalized
+
+        n_shapes = random.randint(int(self.max_shapes / 2), self.max_shapes)
+        for _ in range(n_shapes):
+            color = tuple(random.randint(0, 255) for _ in range(3))
+            no_overlap = False
+            if self.shape_type == "ellipses":
+                for _ in range(self.max_tries):
+                    x1 = random.randint(0, w - 1)
+                    y1 = random.randint(0, h - 1)
+                    x2 = random.randint(x1, min(int(x1 + self.max_size * w), w))
+                    y2 = random.randint(y1, min(int(y1 + self.max_size * h), h))
+                    no_overlap = not _check_overlap(x1, y1, x2, y2, instances.bboxes)
+                    if no_overlap:
+                        break
+                if no_overlap:
+                    is_circle = random.choice([True, False])
+                    filled = random.random() < 0.2
+                    line_width = random.randint(1, 4)
+                    if is_circle:
+                        radius = min(abs(x2 - x1), abs(y2 - y1)) // 2
+                        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                        xy = [cx - radius, cy - radius, cx + radius, cy + radius]
+                    else:
+                        xy = [x1, y1, x2, y2]
+                    draw.ellipse(xy, fill=color if filled else None, outline=color, width=line_width)
+            else:
+                letter = chr(random.randint(65, 90))  # A-Z
+                font_size = random.randint(20, max(21, int(self.max_size * h / 2)))
+                font = ImageFont.load_default(font_size)
+                for _ in range(self.max_tries):
+                    x = random.randint(0, w - 1)
+                    y = random.randint(0, h - 1)
+                    x1, y1, x2, y2 = x, y, x + draw.textlength(letter, font=font), y + font_size
+                    no_overlap = not _check_overlap(x1, y1, x2, y2, instances.bboxes)
+                    if no_overlap:
+                        break
+                if no_overlap:
+                    draw.text((x, y), letter, fill=color, font=font)
+        labels["img"] = np.ascontiguousarray(img)[:, :, ::-1]  # convert back to BGR
+        return labels
+
+
 def v8_transforms(dataset, imgsz: int, hyp: IterableSimpleNamespace):
     """Apply a series of image transformations for training.
 
@@ -2818,6 +2932,11 @@ def v8_transforms(dataset, imgsz: int, hyp: IterableSimpleNamespace):
         perspective=hyp.perspective,
         size=(imgsz, imgsz),
         preserve_obb=getattr(dataset, "use_obb", False),
+        degrees_prob=getattr(hyp, "degrees_prob", 1.0),
+        translate_prob=getattr(hyp, "translate_prob", 1.0),
+        scale_prob=getattr(hyp, "scale_prob", 1.0),
+        shear_prob=getattr(hyp, "shear_prob", 1.0),
+        perspective_prob=getattr(hyp, "perspective_prob", 1.0),
     )
 
     pre_transform = Compose([mosaic, affine])
@@ -2850,6 +2969,9 @@ def v8_transforms(dataset, imgsz: int, hyp: IterableSimpleNamespace):
             RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
             RandomFlip(direction="vertical", p=hyp.flipud, flip_idx=flip_idx),
             RandomFlip(direction="horizontal", p=hyp.fliplr, flip_idx=flip_idx),
+            InsertShapes(p=getattr(hyp, "insert_ellipses", 0.0), max_shapes=getattr(hyp, "max_ellipses", 10), shape_type="ellipses"),
+            InsertShapes(p=getattr(hyp, "insert_letters", 0.0), max_shapes=getattr(hyp, "max_letters", 10), shape_type="letters"),
+            Autocontrast(p=getattr(hyp, "autocontrast", 0.0)),
         ]
     )  # transforms
 
