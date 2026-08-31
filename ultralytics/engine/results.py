@@ -256,6 +256,7 @@ class Results(SimpleClass, DataExportMixin):
         speed: dict[str, float] | None = None,
         semantic_mask: torch.Tensor | None = None,
         depth: torch.Tensor | None = None,
+        box_cls_probs: torch.Tensor | None = None,
     ) -> None:
         """Initialize the Results class for storing and manipulating inference results.
 
@@ -271,6 +272,7 @@ class Results(SimpleClass, DataExportMixin):
             semantic_mask (torch.Tensor | None): A 2D tensor of class IDs for semantic segmentation results.
             depth (torch.Tensor | None): A 2D float tensor of per-pixel depth values (H, W).
             speed (dict | None): A dictionary containing preprocess, inference, and postprocess speeds (ms/image).
+            box_cls_probs (torch.Tensor | None): A 2D tensor (num_boxes, num_classes) of per-box class probabilities.
 
         Notes:
             For the default pose model, keypoint indices for human body pose estimation are:
@@ -281,7 +283,7 @@ class Results(SimpleClass, DataExportMixin):
         """
         self.orig_img = orig_img
         self.orig_shape = orig_img.shape[:2]
-        self.boxes = Boxes(boxes, self.orig_shape) if boxes is not None else None  # native size boxes
+        self.boxes = Boxes(boxes, self.orig_shape, cls_probs=box_cls_probs) if boxes is not None else None  # native size boxes
         self.masks = Masks(masks, self.orig_shape) if masks is not None else None  # native size or imgsz masks
         self.probs = Probs(probs) if probs is not None else None
         self.keypoints = Keypoints(keypoints, self.orig_shape) if keypoints is not None else None
@@ -960,7 +962,12 @@ class Boxes(BaseTensor):
         >>> print(boxes.xywhn)
     """
 
-    def __init__(self, boxes: torch.Tensor | np.ndarray, orig_shape: tuple[int, int]) -> None:
+    def __init__(
+        self,
+        boxes: torch.Tensor | np.ndarray,
+        orig_shape: tuple[int, int],
+        cls_probs: torch.Tensor | np.ndarray | None = None,
+    ) -> None:
         """Initialize the Boxes class with detection box data and the original image shape.
 
         This class manages detection boxes, providing easy access and manipulation of box coordinates, confidence
@@ -971,6 +978,7 @@ class Boxes(BaseTensor):
             boxes (torch.Tensor | np.ndarray): A tensor or numpy array with detection boxes of shape (num_boxes, 6) or
                 (num_boxes, 7). Columns should contain [x1, y1, x2, y2, (optional) track_id, confidence, class].
             orig_shape (tuple[int, int]): The original image shape as (height, width). Used for normalization.
+            cls_probs (torch.Tensor | np.ndarray | None): Per-box class probabilities of shape (num_boxes, num_classes).
         """
         if boxes.ndim == 1:
             boxes = boxes[None, :]
@@ -979,6 +987,11 @@ class Boxes(BaseTensor):
         super().__init__(boxes, orig_shape)
         self.is_track = n == 7
         self.orig_shape = orig_shape
+        self.cls_probs = cls_probs
+        if cls_probs is not None:
+            assert cls_probs.shape[0] == self.data.shape[0], (
+                f"Number of boxes {self.data.shape} and class probabilities {cls_probs.shape} must match."
+            )
 
     @property
     def xyxy(self) -> torch.Tensor | np.ndarray:

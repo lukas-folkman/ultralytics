@@ -51,6 +51,10 @@ class DetectionPredictor(BasePredictor):
             >>> processed_results = predictor.postprocess(preds, img, orig_imgs)
         """
         save_feats = getattr(self, "_feats", None) is not None
+        raw = preds[0] if isinstance(preds, (list, tuple)) else preds  # pre-NMS predictions (bs, 4 + nc, num_anchors)
+        end2end = getattr(self.model, "end2end", False)
+        # Per-box class probabilities are only recoverable from the BCN detect layout (not end2end (B, N, 6) outputs)
+        save_cls_probs = self.args.task == "detect" and not end2end and raw.ndim == 3 and raw.shape[-1] != 6
         preds = nms.non_max_suppression(
             preds,
             self.args.conf,
@@ -59,17 +63,25 @@ class DetectionPredictor(BasePredictor):
             self.args.agnostic_nms,
             max_det=self.args.max_det,
             nc=0 if self.args.task == "detect" else len(self.model.names),
-            end2end=getattr(self.model, "end2end", False),
+            end2end=end2end,
             rotated=self.args.task == "obb",
-            return_idxs=save_feats,
+            return_idxs=save_feats or save_cls_probs,
         )
 
         if not isinstance(orig_imgs, list):  # input images are a torch.Tensor, not a list
             orig_imgs = ops.convert_torch2numpy_batch(orig_imgs)[..., ::-1]
 
+        if save_feats or save_cls_probs:
+            preds, keep_idxs = preds
+
         if save_feats:
-            obj_feats = self.get_obj_feats(self._feats, preds[1])
-            preds = preds[0]
+            obj_feats = self.get_obj_feats(self._feats, keep_idxs)
+
+        if save_cls_probs:
+            # NMS transposes xywh->xyxy in place only on the box columns; class columns 4: remain untouched
+            kwargs["cls_probs"] = [
+                p[4:, idx.view(-1).long()].transpose(0, 1) for p, idx in zip(raw, keep_idxs)
+            ]
 
         results = self.construct_results(preds, img, orig_imgs, **kwargs)
 
@@ -90,23 +102,26 @@ class DetectionPredictor(BasePredictor):
         )  # mean reduce all vectors to same length
         return [feats[idx] if idx.shape[0] else [] for feats, idx in zip(obj_feats, idxs)]  # for each img in batch
 
-    def construct_results(self, preds, img, orig_imgs):
+    def construct_results(self, preds, img, orig_imgs, cls_probs=None):
         """Construct a list of Results objects from model predictions.
 
         Args:
             preds (list[torch.Tensor]): List of predicted bounding boxes and scores for each image.
             img (torch.Tensor): Batch of preprocessed images used for inference.
             orig_imgs (list[np.ndarray]): List of original images before preprocessing.
+            cls_probs (list[torch.Tensor] | None): Per-image (N, num_classes) class probabilities for kept boxes.
 
         Returns:
             (list[Results]): List of Results objects containing detection information for each image.
         """
         return [
-            self.construct_result(pred, img, orig_img, img_path)
-            for pred, orig_img, img_path in zip(preds, orig_imgs, self.batch[0])
+            self.construct_result(pred, img, orig_img, img_path, cls_prob)
+            for pred, orig_img, img_path, cls_prob in zip(
+                preds, orig_imgs, self.batch[0], cls_probs if cls_probs is not None else [None] * len(preds)
+            )
         ]
 
-    def construct_result(self, pred, img, orig_img, img_path):
+    def construct_result(self, pred, img, orig_img, img_path, cls_probs=None):
         """Construct a single Results object from one image prediction.
 
         Args:
@@ -114,9 +129,10 @@ class DetectionPredictor(BasePredictor):
             img (torch.Tensor): Preprocessed image tensor used for inference.
             orig_img (np.ndarray): Original image before preprocessing.
             img_path (str): Path to the original image file.
+            cls_probs (torch.Tensor | None): Class probabilities of the kept boxes with shape (N, num_classes).
 
         Returns:
             (Results): Results object containing the original image, image path, class names, and scaled bounding boxes.
         """
         pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, :4], orig_img.shape)
-        return Results(orig_img, path=img_path, names=self.model.names, boxes=pred[:, :6])
+        return Results(orig_img, path=img_path, names=self.model.names, boxes=pred[:, :6], box_cls_probs=cls_probs)
