@@ -38,7 +38,7 @@ class OBBPredictor(DetectionPredictor):
         super().__init__(cfg, overrides, _callbacks)
         self.args.task = "obb"
 
-    def construct_result(self, pred, img, orig_img, img_path):
+    def construct_result(self, pred, img, orig_img, img_path, cls_probs=None):
         """Construct the result object from the prediction.
 
         Args:
@@ -47,6 +47,7 @@ class OBBPredictor(DetectionPredictor):
             img (torch.Tensor): The image after preprocessing with shape (B, C, H, W).
             orig_img (np.ndarray): The original image before preprocessing.
             img_path (str): The path to the original image.
+            cls_probs (torch.Tensor | None): Unused; per-box class probabilities are only produced for the detect task.
 
         Returns:
             (Results): The result object containing the original image, image path, class names, and oriented bounding
