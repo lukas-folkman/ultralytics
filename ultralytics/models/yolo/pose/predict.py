@@ -41,7 +41,7 @@ class PosePredictor(DetectionPredictor):
         super().__init__(cfg, overrides, _callbacks)
         self.args.task = "pose"
 
-    def construct_result(self, pred, img, orig_img, img_path):
+    def construct_result(self, pred, img, orig_img, img_path, cls_probs=None):
         """Construct the result object from the prediction, including keypoints.
 
         Extends the parent class implementation by extracting keypoint data from predictions and adding them to the
@@ -53,12 +53,13 @@ class PosePredictor(DetectionPredictor):
             img (torch.Tensor): The processed input image tensor with shape (B, C, H, W).
             orig_img (np.ndarray): The original unprocessed image as a numpy array.
             img_path (str): The path to the original image file.
+            cls_probs (torch.Tensor | None): Class probabilities of the kept boxes with shape (N, num_classes).
 
         Returns:
             (Results): The result object containing the original image, image path, class names, bounding boxes, and
                 keypoints.
         """
-        result = super().construct_result(pred, img, orig_img, img_path)
+        result = super().construct_result(pred, img, orig_img, img_path, cls_probs)
         # Extract keypoints from prediction and reshape according to model's keypoint shape
         pred_kpts = pred[:, 6:].view(pred.shape[0], *self.model.kpt_shape)
         # Scale keypoints coordinates to match the original image dimensions
