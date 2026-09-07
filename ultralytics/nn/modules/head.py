@@ -1484,6 +1484,7 @@ class RTDETRDecoder(nn.Module):
 
     export = False  # export mode
     max_det = 300  # max detections per image
+    agnostic_nms = False  # one label per query (see postprocess)
     shapes = []
     anchors = torch.empty(0)
     valid_mask = torch.empty(0)
@@ -1633,11 +1634,20 @@ class RTDETRDecoder(nn.Module):
         """
         k = min(self.num_queries, self.max_det) if self.export else self.num_queries
         groups = 8 if self.export and self.format == "engine" and not self.dynamic else 1
-        scores, index = Detect._grouped_topk(scores.flatten(1), k, groups)
-        # CoreML MIL lacks integer floor-div and mod lowering: use torch.div(rounding_mode="floor") and (index - q*nc).
-        query_idx = torch.div(index, self.nc, rounding_mode="floor")
+        if self.agnostic_nms:
+            # One label per query, mirroring Detect.get_topk_index: without it the
+            # flat top-k lets one query win several slots with the same box.
+            # Cast before the gather as get_topk_index does -- see the CoreML note below.
+            scores, labels = scores.max(dim=-1)
+            scores, query_idx = Detect._grouped_topk(scores, k, 1)
+            labels = labels[..., None].float().gather(dim=1, index=query_idx[..., None])
+        else:
+            scores, index = Detect._grouped_topk(scores.flatten(1), k, groups)
+            # CoreML MIL lacks integer floor-div and mod lowering: use torch.div(rounding_mode="floor") and (index - q*nc).
+            query_idx = torch.div(index, self.nc, rounding_mode="floor")
+            labels = (index - query_idx * self.nc)[..., None].float()
         boxes = boxes.gather(dim=1, index=query_idx.unsqueeze(-1).expand(-1, -1, 4).long())
-        return torch.cat([boxes, scores[..., None], (index - query_idx * self.nc)[..., None].float()], dim=-1)
+        return torch.cat([boxes, scores[..., None], labels], dim=-1)
 
     @staticmethod
     def _generate_anchors(

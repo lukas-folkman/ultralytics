@@ -534,7 +534,7 @@ class Model(torch.nn.Module):
                 self.predictor.args.show = checks.check_imshow(warn=True)
             if prev_save_args != tuple(getattr(self.predictor.args, k, None) for k in save_keys):
                 self.predictor.save_dir = get_save_dir(self.predictor.args)
-            if getattr(self.model, "end2end", False):
+            if hasattr(self.model, "set_head_attr"):
                 self.model.set_head_attr(
                     max_det=max(self.predictor.args.max_det, 300), agnostic_nms=self.predictor.args.agnostic_nms
                 )

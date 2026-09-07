@@ -66,7 +66,7 @@ vid_stride: 1 # (int) read every Nth frame for video sources
 stream_buffer: False # (bool) True buffers all frames; False keeps the most recent frame for low-latency streams
 visualize: False # (bool) save class activation heatmaps (predict) or visualize TP/FP/FN confusion (val)
 augment: False # (bool) apply test-time augmentation during prediction
-agnostic_nms: False # (bool) class-agnostic NMS
+agnostic_nms: False # (bool) class-agnostic NMS; on NMS-free heads, one label per anchor/query
 classes: # (int | list[int], optional) filter by class id(s), e.g. 0 or [0,2,3]
 retina_masks: False # (bool) use high-resolution segmentation masks (segment)
 embed: # (list[int], optional) return feature embeddings from given layer indices

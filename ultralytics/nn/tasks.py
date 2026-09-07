@@ -524,7 +524,10 @@ class DetectionModel(BaseModel):
         head = self.model[-1]
         for k, v in kwargs.items():
             if not hasattr(head, k):
-                LOGGER.warning(f"Head has no attribute '{k}'.")
+                # debug, not warning: callers push a fixed set of keys to whatever
+                # head the task has, so "this head does not take that" is routine
+                # (Depth and Classify heads take neither max_det nor agnostic_nms).
+                LOGGER.debug(f"Head has no attribute '{k}'.")
                 continue
             setattr(head, k, v)
 

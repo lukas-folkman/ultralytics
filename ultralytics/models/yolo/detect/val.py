@@ -132,7 +132,8 @@ class DetectionValidator(BaseValidator):
         self.nc = len(model.names)
         self.end2end = getattr(model, "end2end", False)
         native_model = model.model if getattr(model, "format", None) == "pt" else model
-        if self.end2end and hasattr(native_model, "set_head_attr"):
+        # not self.end2end: RTDETRDecoder is NMS-free but has no end2end attribute
+        if hasattr(native_model, "set_head_attr"):
             native_model.set_head_attr(max_det=self.args.max_det, agnostic_nms=self.args.agnostic_nms)
         self.seen = 0
         self.jdict = []
